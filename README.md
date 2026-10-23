@@ -53,6 +53,7 @@ memory. A 32 GB PC with a 12-16 GB card runs the smaller sizes, and 64 GB runs e
 | **Intel** Arc | [Intel Arc](docs/INTEL_ARC.md) |
 | **Apple Silicon Mac**, M1 or newer, macOS 15 or newer | [Mac](docs/MAC.md) |
 | **AMD Ryzen AI Max (Strix Halo)** and other unified-memory PCs | [Strix Halo](docs/STRIX_HALO.md) |
+| **NVIDIA DGX Spark** (GB10, arm64), experimental, built from source | [DGX Spark](docs/DGX_SPARK.md) |
 | Older cards and processors | [Older GPUs](docs/OLDER_GPUS.md) |
 
 You also need about 80 GB of free disk (an SSD), Windows 10 / 11, Linux or macOS, and a current graphics driver. Two or

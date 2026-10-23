@@ -87,6 +87,8 @@ def home() -> Path:
 
 
 WIN = os.name == "nt"
+# arm64 Linux: an NVIDIA DGX Spark (GB10, unified memory; docs/DGX_SPARK.md). No AVX, and its engine needs none
+ARM64_LINUX = sys.platform.startswith("linux") and platform.machine().lower() in ("aarch64", "arm64")
 # #214: every Hugging Face file comes from a fixed commit of its repository (the `sha` of
 # https://huggingface.co/api/models/<repo> when this was pinned), so a checkout installs the same files on any
 # day.  Every file has a fixed size and SHA-256 too (REPO_PINS); a revision the repository no longer has stops the
@@ -1331,6 +1333,11 @@ def cpu_info():
         n = out(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor).Name"]).strip()
         name = n or name
         avx512 = bool(pf(41)) and _cpuid_avx512_full()
+    elif ARM64_LINUX:
+        # arm64 /proc/cpuinfo has "Features", no "flags" and no "model name": lscpu names the cores (a DGX Spark:
+        # Cortex-X925 + Cortex-A725). No AVX of any kind; the arm64 engine needs none (CMakeLists.txt, STRATA_ARM64)
+        cores = re.findall(r"^\s*Model name:\s*(.+)$", out(["lscpu"]), re.M)
+        name = " + ".join(dict.fromkeys(c.strip() for c in cores)) or platform.processor() or "arm64 CPU"
     else:
         try:
             txt = open("/proc/cpuinfo").read()
@@ -1339,7 +1346,7 @@ def cpu_info():
             avx512 = {"avx512f", "avx512bw", "avx512vl", "avx512_vnni", "avx512vbmi"} <= flags
             m = re.search(r"^model name\s*:\s*(.*)$", txt, re.M)
             name = m.group(1) if m else name
-        except OSError:
+        except (OSError, AttributeError):
             pass
     return name, avx2, avx512
 
@@ -1369,6 +1376,8 @@ def cpu_floor(avx2: bool) -> str:
     """The experimental older-CPU build this PC needs (#394 #595 #623): "" with AVX2 (the normal engine), "avx" (Sandy /
     Ivy Bridge, AMD Bulldozer), "none" (SSE4.2 + POPCNT: Nehalem, Westmere), or "unsupported".  STRATA_ISA_FLOOR=avx|
     none asks for that build on any PC (testing it on a newer one)."""
+    if ARM64_LINUX:                                    # x86 floors mean nothing here: the arm64 engine is the normal one
+        return ""
     forced = os.environ.get("STRATA_ISA_FLOOR", "").strip().lower()
     if forced in ("avx", "none"):
         return forced
@@ -1456,6 +1465,14 @@ def gpus():
     for line in s.strip().splitlines():
         try:
             idx, name, mem, cc, drv = [x.strip() for x in line.split(",")]
+            if ARM64_LINUX and not re.fullmatch(r"\d+(\.\d+)?", mem):
+                # a DGX Spark (GB10): one memory for the CPU and the GPU, and nvidia-smi gives memory.total as [N/A].
+                # Counted as Strix Halo's is (amd_apply_uma): the GPU may use all of the RAM but the OS's share
+                ram = ram_gb()
+                shared = max(0.0, ram - UMA_OS_LEFT_GB)
+                found.append({"index": int(idx), "name": name, "vram_gb": shared, "arch": cc.replace(".", ""),
+                              "driver": drv, "uma": True, "dedicated_gb": 0.0, "shared_gb": shared})
+                continue
             found.append({"index": int(idx), "name": name, "vram_gb": float(mem) / 1024.0, "arch": cc.replace(".", ""),
                           "driver": drv})
         except ValueError:
@@ -5437,7 +5454,9 @@ def install_build_tools(gpu, yes):
                 fail("the CUDA Toolkit can be installed automatically on Ubuntu 22.04 / 24.04 and Debian 12 / 13 only",
                      "install it from https://developer.nvidia.com/cuda-downloads and run it again")
             deb = Path("/tmp/cuda-keyring.deb")
-            download(f"https://developer.download.nvidia.com/compute/cuda/repos/{repo}/x86_64/cuda-keyring_1.1-1_all.deb",
+            # NVIDIA's arm64 server repository is "sbsa" (a DGX Spark; DGX OS normally has the toolkit already)
+            download(f"https://developer.download.nvidia.com/compute/cuda/repos/{repo}/{'sbsa' if ARM64_LINUX else 'x86_64'}"
+                     "/cuda-keyring_1.1-1_all.deb",
                      deb, "CUDA repository key")
             run(["sudo", "dpkg", "-i", str(deb)])
             run(["sudo", "apt-get", "update"])
@@ -8800,7 +8819,9 @@ def main() -> int:
         gpu["archs"] = sorted({x["arch"] for x in chosen})  # the engine needs code for every one of them
         if multi:
             ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
-        ok(f"GPU: {gpu['name']}, {gpu['vram_gb']:.1f} GB VRAM, compute capability {cc(gpu)}, driver {gpu['driver']}")
+        ok(f"GPU: {gpu['name']}, " + (f"unified memory ({gpu['vram_gb']:.0f} GB usable by the GPU, docs/DGX_SPARK.md)"
+                                      if gpu.get("uma") else f"{gpu['vram_gb']:.1f} GB VRAM")
+           + f", compute capability {cc(gpu)}, driver {gpu['driver']}")
         cuda_tk, why = cuda_choice(gpu["archs"], a.cuda)   # one engine per model: its oldest card decides
         if why:
             (warn if cuda_tk == 13 or str(a.cuda) == "12" else ok)(f"CUDA {cuda_tk}: {why}")
@@ -8835,7 +8856,7 @@ def main() -> int:
     pf = page_file_gb()
     if pf is not None and pf < 4:
         warn(page_file_advice(pf, page_file_setting()))
-    ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
+    ok(f"CPU: {cpu} ({'arm64' if ARM64_LINUX else 'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     link = None if hip else pcie_link(int(gpu.get("index", 0)))
     if link is not None:
         line, problem = pcie_lines(link)
@@ -8845,7 +8866,7 @@ def main() -> int:
     floor = cpu_floor(avx2)
     if floor == "unsupported":
         fail("this CPU has neither AVX2 nor SSE4.2; Strata needs at least SSE4.2 (Intel Nehalem, 2008, or newer)")
-    if not avx2:
+    if not avx2 and not ARM64_LINUX:
         # #394 #595 #623: the ready-made engine is AVX2; an older CPU gets one compiled here, whose CPU experts run on
         # ggml-cpu's kernels for this CPU.  Experimental: measured only on newer CPUs with the older path forced, and by
         # users on a few Xeons.  A warning, not a stop.

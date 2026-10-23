@@ -47,6 +47,24 @@ endif()
 if(STRATA_PORTABLE AND MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
+# arm64 Linux (NVIDIA DGX Spark: GB10, sm_121, a Grace CPU): the CUDA engine without Strata's x86 CPU expert kernels, as
+# the Metal build does it (metal/CMakeLists.txt).  include/arm64_compat goes first on the include path and gives the
+# host loops _mm_pause / _mm_sfence and a <cpuid.h> whose every leaf reads zero; the AVX / AVX-512 kernel files are
+# left out and src/kernels/cpu/arm64_stubs.cpp stands in for them.  A native pack's CPU experts run on ggml-cpu's own
+# (NEON) rows; on a Spark every expert normally sits in the GPU's share of the unified memory anyway.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$" AND NOT APPLE)
+  set(STRATA_ARM64 ON)
+  if(STRATA_ISA_FLOOR)
+    message(FATAL_ERROR "STRATA_ISA_FLOOR is an x86 option; leave it empty on arm64")
+  endif()
+  include_directories(BEFORE ${CMAKE_CURRENT_SOURCE_DIR}/include/arm64_compat)
+  # STRATA_PORTABLE: ggml-cpu for any Armv8.2 CPU with dot product and int8 matmul (the Grace CPU of a DGX Spark has
+  # both) instead of the build host's, which may be an Apple Silicon Mac running the build in an arm64 container
+  set(STRATA_ARM64_ARCH "armv8.2-a+dotprod+fp16+i8mm" CACHE STRING "arm64: ggml-cpu's -march for a STRATA_PORTABLE build")
+  message(STATUS "Strata: arm64 build (x86 CPU expert kernels left out)")
+else()
+  set(STRATA_ARM64 OFF)
+endif()
 
 # #3202: Windows hands a program its command line in the system's ANSI code page (cp1251 / cp866 on a Russian Windows, cp1252 on an
 # English one), but the engine reads every path as UTF-8 (the run configs and the server write UTF-8). A model folder with
@@ -119,6 +137,9 @@ endif()
 set(_strata_tests_default OFF)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bench/micro)
   set(_strata_tests_default ON)
+endif()
+if(STRATA_ARM64)
+  set(_strata_tests_default OFF)   # the suite tests the x86 CPU kernels too; an arm64 build has none of them
 endif()
 option(STRATA_BUILD_TESTS "Build the test suite" ${_strata_tests_default})
 option(STRATA_BUILD_CONVERSATION_TESTS "Build standalone conversation cache tests" OFF)
@@ -1596,12 +1617,19 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
   add_test(NAME batch_groups_test COMMAND batch_groups_test)
 endif()
 
-add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
-            src/kernels/cpu/expert_layout.cpp src/kernels/cpu/q2_avx2.cpp src/kernels/cpu/hadamard.cpp)
+if(STRATA_ARM64)
+  add_library(strata_kernels_cpu STATIC src/kernels/cpu/pool.cpp src/kernels/cpu/expert_layout.cpp
+              src/kernels/cpu/hadamard.cpp src/kernels/cpu/arm64_stubs.cpp)
+else()
+  add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
+              src/kernels/cpu/expert_layout.cpp src/kernels/cpu/q2_avx2.cpp src/kernels/cpu/hadamard.cpp)
+endif()
 target_include_directories(strata_kernels_cpu PUBLIC include)
 # Plan v0.3 P6: only the kernel files get the AVX-512 / AVX2 flags; the pool and the probe run on any x86-64,
 # and the engine picks the kernels at run time (cpu_avx512_ok).
-if(MSVC)
+if(STRATA_ARM64)
+  # no x86 kernel file in this build
+elseif(MSVC)
   set_source_files_properties(src/kernels/cpu/expert.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
   set_source_files_properties(src/kernels/cpu/q2_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 else()
@@ -1620,6 +1648,9 @@ if(MSVC)
 else()
   set(CMAKE_REQUIRED_FLAGS "-mavx2 -mfma -mf16c")
 endif()
+if(STRATA_ARM64)
+  set(STRATA_HAVE_AVXVNNI_INTRINSICS OFF)   # not asked: there is no AVX on arm64, and q2_avx2.cpp is not built
+else()
 check_cxx_source_compiles([=[
 #include <immintrin.h>
 #if defined(__GNUC__) || defined(__clang__)
@@ -1631,6 +1662,7 @@ int main() {
     return _mm256_extract_epi32(dots(_mm256_set1_epi32(x), _mm256_set1_epi32(x)), 0) == 0;
 }
 ]=] STRATA_HAVE_AVXVNNI_INTRINSICS)
+endif()
 unset(CMAKE_REQUIRED_FLAGS)
 if(STRATA_HAVE_AVXVNNI_INTRINSICS)
   set(_strata_avxvnni STRATA_AVXVNNI=1)
@@ -1662,7 +1694,10 @@ if(STRATA_NATIVE_EXPERTS)
   set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-  if(STRATA_PORTABLE)
+  if(STRATA_PORTABLE AND STRATA_ARM64)
+    set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+    set(GGML_CPU_ARM_ARCH "${STRATA_ARM64_ARCH}" CACHE STRING "" FORCE)
+  elseif(STRATA_PORTABLE)
     set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
     foreach(_f GGML_AVX GGML_AVX2 GGML_FMA GGML_F16C GGML_BMI2)
       set(${_f} ON CACHE BOOL "" FORCE)
@@ -1709,13 +1744,19 @@ if(STRATA_NATIVE_EXPERTS)
   endif()
   # part of strata_kernels_cpu (the pool calls these and they call its CPU probe: one library, so GNU ld's
   # one-pass static linking has no cycle to resolve)
+  if(STRATA_ARM64)   # the dispatchers only: their x86 rows are arm64_stubs.cpp, ggml-cpu computes the experts
+    target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/tq_cpu.cpp)
+  else()
   target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
                                            src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx2.cpp
                                            src/kernels/cpu/kq_avx1.cpp src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp
                                            src/kernels/cpu/nvfp4_avx512.cpp src/kernels/cpu/nvfp4_avx2.cpp
                                            src/kernels/cpu/tq_cpu.cpp src/kernels/cpu/tq_avx2.cpp src/kernels/cpu/tq_avx512.cpp)
+  endif()
   target_include_directories(strata_kernels_cpu PRIVATE third_party/ggml)
-  if(MSVC)
+  if(STRATA_ARM64)
+    # no x86 kernel file in this build
+  elseif(MSVC)
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/nvfp4_avx512.cpp
                                 PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
@@ -1765,6 +1806,8 @@ if(STRATA_NATIVE_EXPERTS)
     target_link_libraries(dequant_q5_1_test PRIVATE strata_artifact ggml-base)
     add_test(NAME dequant_q5_1_test COMMAND dequant_q5_1_test)
   endif()
+  # the x86 kernels' parity programs and benches below: not on arm64, which has none of those kernels
+  if(NOT STRATA_ARM64)
   # the router lookahead's dot on each rung this CPU has (AVX2, the older CPUs' AVX1) against a double reference
   add_executable(router_dot_parity src/kernels/cpu/router_dot_parity.cpp)
   target_link_libraries(router_dot_parity PRIVATE strata_kernels_cpu)
@@ -1802,6 +1845,7 @@ if(STRATA_NATIVE_EXPERTS)
     add_test(NAME q8k_quant_parity COMMAND q8k_quant_parity)
     add_test(NAME q8k_quant_parity_avx COMMAND ${CMAKE_COMMAND} -E env STRATA_FORCE_ISA=avx $<TARGET_FILE:q8k_quant_parity>)
   endif()
+  endif()   # NOT STRATA_ARM64
   set(_strata_mmq_types q2_0 iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q8_0)
   # APR: the agention llama.cpp fork has MMQ instances for its trellis expert types (f62fdead0); any other ggml
   # tree leaves them to the FP16 prompt path

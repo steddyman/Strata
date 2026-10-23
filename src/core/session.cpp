@@ -27,6 +27,9 @@
 #include <immintrin.h>
 #define STRATA_SPIN_PAUSE() _mm_pause()
 #else
+#if defined(__aarch64__) && defined(__linux__)
+#include <immintrin.h>   // include/arm64_compat (DGX Spark): the _mm_sfence below as an arm64 store barrier
+#endif
 #define STRATA_SPIN_PAUSE() ((void) 0)
 #endif
 

@@ -55,7 +55,7 @@ main() {
   case "$os-$arch" in
     Linux-x86_64|Linux-amd64) platform=linux-x86_64 ;;
     Darwin-arm64|Darwin-aarch64) platform=macos-arm64 ;;
-    Linux-aarch64|Linux-arm64) die "this computer ($os $arch) has an ARM processor. Strata needs an NVIDIA or AMD graphics card and has no engine for ARM Linux, so it could not run a model here. Use a Linux PC with an Intel or AMD processor (x86_64) and one of those cards." ;;
+    Linux-aarch64|Linux-arm64) die "this computer ($os $arch) has an ARM processor. There is no Strata Terminal for ARM Linux. On an NVIDIA DGX Spark, build the engine from source and start it with ./setup.sh: https://github.com/Niko1221/Strata/blob/main/docs/DGX_SPARK.md" ;;
     Darwin-x86_64) die "this Mac has an Intel processor. Strata for Mac needs Apple silicon (M1 or newer), so it could not run a model here." ;;
     *) die "this computer ($os $arch) has no Strata Terminal. Supported: Linux x86_64 with an NVIDIA or AMD card, macOS on Apple silicon (Windows: use install.ps1)." ;;
   esac
