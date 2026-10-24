@@ -111,13 +111,50 @@ head for decode, without for prompts). At 4K, temp 0: 1266 vs 952 tok/s prompt, 
 Answers and pictures were checked by hand: a factual question with a code answer, and a picture of a red square and a blue
 circle, described correctly.
 
+## DeepSeek-V4.1-Flash on a Spark
+
+DeepSeek has its own engine, `strata-dsv41`. `spark/build_engine.sh` builds it beside the Strata engine (`BUILD_DSV41=0`
+leaves it out), and setup takes `engine/strata-dsv41` from there: the ready-made DeepSeek engine packages are x86_64
+only, so on arm64 setup never downloads one and says how to build it instead.
+
+```sh
+./setup.sh --setup --family deepseek41 --model IST-DAS-2.00bpw
+```
+
+Its experts are bigger than a Spark's memory (1.75 bpw: 115 GB, 2.00 bpw: 132 GB, 2.25 bpw: 149 GB, plus a 111 GB n-gram
+table that always stays on the SSD), so part of them is always read from the SSD while it answers. What the arm64 build
+changes for it:
+
+- **Unified memory.** The engine sized its GPU share from `cudaMemGetInfo`, which on the GB10 counts only free memory, not
+  the page cache Linux gives back. After setup had read the model files it saw 55 GB and put 42 GB of experts on the GPU
+  (4,840 of 15,360); 91 GB ran on the Arm cores. With memory empty (after a restart) the same engine placed experts against
+  the whole memory beside its RAM store and **was killed by the kernel's out-of-memory killer** at the start. On an
+  integrated GPU on Linux it now counts what Linux can still give back, less 6 GiB (`DS4_UMA_HEADROOM_GIB`), as Strata's own
+  engine does: 106.8 GB of experts on the GPU (11,894 of 15,744 with the drafter's), 33.2 GB from the SSD, both after a
+  restart and with a full page cache.
+- **Setup's plan** for DeepSeek counts the GB10's memory once: the GPU's experts are the RAM, the rest comes from the SSD.
+
+Measured on the same Spark, IST-DAS 2.00 bpw, 8K context, DSpark drafter on (setup's config), temp 0, no thinking:
+6 short questions (256 tokens) and 2 prompts of 3,709 tokens, medians, the server's own timings, 2026-10-24:
+
+| | answers, short questions | 3,709-token prompt read | answers after it |
+| --- | ---: | ---: | ---: |
+| started after a restart (cold page cache) | 17.4 tok/s (12.2-26.3, rising as it warms) | 175.1 tok/s | 17.5 tok/s |
+| started with the model files in the page cache | 28.4 tok/s (15.2-40.8) | 174.7 tok/s | 17.1 tok/s |
+| before the change, page cache full: 42 GB on the GPU (2 requests) | 10.4 and 12.2 tok/s | - | - |
+| before the change, memory empty | killed at start (out of memory) | - | - |
+
+For comparison, the release notes measured 4.7 tok/s on an RTX 5070 with 64 GB of RAM. Answers were read by hand: correct
+(the Fibonacci function, a hash table explained). The DSpark drafter accepted 80-95% of its tokens on these questions.
+
 ## What was checked, and what was not
 
 - Checked: the engine (`strata`, `libstrata_kq.so`) and the picture reader (`strata-vision`) compile and link for arm64
   with CUDA 13.0 for `sm_121`, in the container `spark/build_on_mac.sh` uses. Setup's handling of the GB10 and of the
   arm64 CPU has tests: `python -m unittest tools.test_setup_spark`.
 - Checked on a DGX Spark: setup, the start, tuning, `./bench.sh`, chat and pictures with NVFP4 (above).
-- Not checked: the other model families on a Spark, the Mac-built engine against the Spark-built one for speed, long
+- Checked on a DGX Spark: DeepSeek-V4.1-Flash IST-DAS 2.00 bpw (above): setup, its test question, serving and speed.
+- Not checked: DeepSeek's other sets (1.75 / 2.25 bpw, UD-Q8_K_XL) and long DeepSeek sessions, the other Qwen families on a Spark, the Mac-built engine against the Spark-built one for speed, long
   sessions, and `strata bench run` (the standard benchmark).
 - Not available: the Strata app, the `strata` Terminal and its `install.sh`, and the Docker images are for x86_64 only.
 
