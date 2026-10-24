@@ -274,6 +274,9 @@ bool cpu_avxvnni_ok() {
 }
 
 std::string cpu_name() {
+#if defined(__aarch64__) && defined(__linux__)   // no brand string to read (arm64_compat/cpuid.h reads zero)
+    return "arm64";
+#endif
     unsigned r[12] = {};
 #if defined(_MSC_VER)
     int x[4];

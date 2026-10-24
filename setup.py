@@ -9464,6 +9464,13 @@ def main() -> int:
            "experts.bin on the SSD as needed")
     elif low_ram:   # the experts from the pack's experts.bin: the ones the GPU does not hold copied into RAM, or mapped
         args += ["--resident-experts" if resident else "--mmap-experts"]
+    elif ARM64_LINUX and gpu.get("uma") and "--resident-budget-gib" not in args:
+        # a DGX Spark: the RAM copy of the experts and the GPU's cache are the same memory. Mapped, every expert fits
+        # in the cache (NVFP4 on a 128 GB GB10, 2026-10-24: 24576 of 24576 slots, not 13702; chat decode 44.4 vs
+        # 40.6 tok/s, 16K prompt 1471 vs 1397 tok/s, tools/strata_bench.py medians)
+        args += ["--mmap-experts"]
+        ok("unified memory: the experts are read from the model files in place (--mmap-experts), so the GPU's cache "
+           "holds them instead of a second copy in RAM")
     disk = None if is_wsl() else rotational_disk(ple)  # #605 (WSL's virtual disk says rotational)
     if disk:
         tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
