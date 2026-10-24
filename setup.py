@@ -5126,6 +5126,11 @@ def get_prebuilt(url_base, gpu, vision, updating=False, toolkit=13) -> Path | No
             return eng
         say(f"  Updating the ready-made engine ({meta.get('version')} -> {'.'.join(map(str, MIN_ENGINE))} or newer) ...")
         info.replace(eng / "BUILD.json.prev")   # kept for the .previous copy
+    if ARM64_LINUX:
+        # the release and the signed feed have x86_64 engines only: a DGX Spark compiles one (docs/DGX_SPARK.md)
+        warn(f"no engine in {eng} (an arm64 PC has no ready-made one): compiling it here. To use one built on a Mac "
+             f"instead (spark/build_on_mac.sh), put its out-spark/engine folder at {eng} and run this again")
+        return None
     if not url_base:
         return None
     eng.mkdir(exist_ok=True)

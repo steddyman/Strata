@@ -41,5 +41,6 @@ docker run --rm --platform linux/arm64 \
 tar -C "$repo/out-spark" -czf "$repo/out-spark/strata-spark-engine.tar.gz" engine
 echo
 echo "Engine for the DGX Spark: $repo/out-spark/engine"
-echo "Copy it next to a Strata checkout on the Spark (docs/DGX_SPARK.md), for example:"
-echo "  scp $repo/out-spark/strata-spark-engine.tar.gz spark:~/ && ssh spark 'tar -xzf strata-spark-engine.tar.gz -C ~/Strata'"
+echo "Unpack it INTO the Strata folder on the Spark, so that it becomes <Strata folder>/engine (docs/DGX_SPARK.md), e.g."
+echo "  scp $repo/out-spark/strata-spark-engine.tar.gz spark:~/"
+echo "  ssh spark 'tar -xzf ~/strata-spark-engine.tar.gz -C <Strata folder> && ls <Strata folder>/engine/strata'"

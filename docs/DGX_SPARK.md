@@ -59,7 +59,9 @@ You can also let setup compile it: `./setup.sh --build` (10-20 minutes, once).
    ssh spark 'tar -xzf strata-spark-engine.tar.gz -C ~/Strata'
    ```
 
-   Replace `spark` with your Spark's host name, and `~/Strata` with where the Strata folder is.
+   Replace `spark` with your Spark's host name, and `~/Strata` with where the Strata folder is. The engine must end up
+   as `engine/` inside that folder: `ls ~/Strata/engine/strata` should list the file. If setup finds no engine there, it
+   says which folder it looked in and compiles one on the Spark instead (this needs the CUDA toolkit, which DGX OS has).
 3. On the Spark, in the Strata folder, run:
 
    ```sh
