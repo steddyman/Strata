@@ -77,8 +77,9 @@ ISTA_DENSE_GB = 6.16                  # the dense weights in the shards (attenti
 ISTA_DENSE_ON_GPU_GB = 4.5            # what a card holds of them with a 12 GB card (measured on the 5070 / 3060: the engine places the rest itself)
 # Measured 2026-10-24 on one DGX Spark (GB10, 128 GB unified memory, the engine's unified-memory placement, src/dsv41 uma_free): 2.00 bpw with
 # 106.8 GB of experts on the GPU and 33.2 GB read from the SSD; medians of 6 short answers and 2 prompts of 3,709 tokens, temp 0
-ISTA_MEASURED_UMA = ("Measured on a DGX Spark (128 GB) with the 2.00 bpw set: answers 17 tokens a second just after the start, 28 once "
-                     "warm; a 3,700-token prompt read at about 175 tokens a second.")
+ISTA_MEASURED_UMA = ("Measured on a DGX Spark (128 GB): the 2.00 bpw set answers 17 tokens a second just after the start and 28 once "
+                     "warm, and reads a 3,700-token prompt at about 175 tokens a second; the 1.75 bpw set, more of it on the GPU, "
+                     "answers 24 then 33 tokens a second and reads that prompt at 210-300.")
 ISTA_MEASURED = ("an RTX 5070 (12 GB) with 64 GB of RAM and a 3.6 GB/s NVMe drive: answers about 4.7 tokens a second, a 4,000-token prompt "
                  "read at 121 tokens a second; an RTX 3060 (12 GB) with 46 GB of RAM: about 7.2 tokens a second; four Radeon AI PRO R9700 cards: "
                  "about 31 tokens a second")

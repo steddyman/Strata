@@ -86,14 +86,17 @@ One DGX Spark (GB10, 128 GB, DGX OS, driver 580.178.04), engine 0.1.48.1 built o
 `sm_121`, NVFP4 (Maximilian228 Qwen3.8-Flash-Next-NVFP4-GPTQ), 128K context, 8-bit KV, images on. `tools/strata_bench.py`
 (`./bench.sh`) medians, 2026-10-24:
 
-| | experts copied to RAM (before) | `--mmap-experts` (setup's default here) |
-| --- | --- | --- |
-| experts in the GPU's cache | 13702 of 24576 | 24576 of 24576 |
-| chat output | 40.6 tok/s | 44.4 tok/s |
-| 4K prompt | 1222 tok/s | 1322 tok/s |
-| 16K prompt | 1397 tok/s | 1471 tok/s |
-| first token, 16K prompt | 11.55 s | 10.97 s |
-| agent turns, output | 43.6 tok/s | 43.1 tok/s |
+| | experts copied to RAM (before) | `--mmap-experts` (setup's default here) | the same on engine 0.1.49.2, tuned |
+| --- | --- | --- | --- |
+| experts in the GPU's cache | 13702 of 24576 | 24576 of 24576 | 24576 of 24576 |
+| chat output | 40.6 tok/s | 44.4 tok/s | 44.7 tok/s |
+| 4K prompt | 1222 tok/s | 1322 tok/s | 1330 tok/s |
+| 16K prompt | 1397 tok/s | 1471 tok/s | 1471 tok/s |
+| first token, 16K prompt | 11.55 s | 10.97 s | 10.96 s |
+| agent turns, output | 43.6 tok/s | 43.1 tok/s | 44.6 tok/s |
+
+The last column is the 0.2.4 release's engine (0.1.49.2) with setup's tuning (`--pool-workers 4`, below), the same day:
+the same speed within the runs' spread.
 
 Setup's tuning then chose `--pool-workers 4` (43.9 tok/s in its own measurement). Its PCIe-share step measures nothing
 here (44.0-44.2 tok/s at every value): every expert is already on the GPU.
@@ -134,7 +137,7 @@ changes for it:
   restart and with a full page cache.
 - **Setup's plan** for DeepSeek counts the GB10's memory once: the GPU's experts are the RAM, the rest comes from the SSD.
 
-Measured on the same Spark, IST-DAS 2.00 bpw, 8K context, DSpark drafter on (setup's config), temp 0, no thinking:
+Measured on the same Spark, IST-DAS 2.00 bpw (and 1.75 bpw, last rows), engine 0.1.49.2, 8K context, DSpark drafter on (setup's config), temp 0, no thinking:
 6 short questions (256 tokens) and 2 prompts of 3,709 tokens, medians, the server's own timings, 2026-10-24:
 
 | | answers, short questions | 3,709-token prompt read | answers after it |
@@ -142,9 +145,13 @@ Measured on the same Spark, IST-DAS 2.00 bpw, 8K context, DSpark drafter on (set
 | started after a restart (cold page cache) | 17.4 tok/s (12.2-26.3, rising as it warms) | 175.1 tok/s | 17.5 tok/s |
 | started with the model files in the page cache | 28.4 tok/s (15.2-40.8) | 174.7 tok/s | 17.1 tok/s |
 | before the change, page cache full: 42 GB on the GPU (2 requests) | 10.4 and 12.2 tok/s | - | - |
+| **1.75 bpw**, started with memory empty: 107.3 GB on the GPU, 15.2 GB from the SSD | 23.5 tok/s (19.4-36.3) | 207.4 tok/s | 22.8 tok/s |
+| **1.75 bpw**, the same server's second run | 33.0 tok/s (22.7-43.5) | 298.5 tok/s | 21.1 tok/s |
 | before the change, memory empty | killed at start (out of memory) | - | - |
 
-For comparison, the release notes measured 4.7 tok/s on an RTX 5070 with 64 GB of RAM. Answers were read by hand: correct
+The 1.75 bpw set keeps more of its experts on the GPU and is faster here, at a lower quality (perplexity +21% against
++15.5% for 2.00, and noticeably weaker on plain prose; setup's menu says the same). For comparison, the release notes
+measured 4.7 tok/s on an RTX 5070 with 64 GB of RAM. Answers were read by hand: correct
 (the Fibonacci function, a hash table explained). The DSpark drafter accepted 80-95% of its tokens on these questions.
 
 ## What was checked, and what was not
@@ -153,8 +160,8 @@ For comparison, the release notes measured 4.7 tok/s on an RTX 5070 with 64 GB o
   with CUDA 13.0 for `sm_121`, in the container `spark/build_on_mac.sh` uses. Setup's handling of the GB10 and of the
   arm64 CPU has tests: `python -m unittest tools.test_setup_spark`.
 - Checked on a DGX Spark: setup, the start, tuning, `./bench.sh`, chat and pictures with NVFP4 (above).
-- Checked on a DGX Spark: DeepSeek-V4.1-Flash IST-DAS 2.00 bpw (above): setup, its test question, serving and speed.
-- Not checked: DeepSeek's other sets (1.75 / 2.25 bpw, UD-Q8_K_XL) and long DeepSeek sessions, the other Qwen families on a Spark, the Mac-built engine against the Spark-built one for speed, long
+- Checked on a DGX Spark: DeepSeek-V4.1-Flash IST-DAS 2.00 and 1.75 bpw (above): setup, its test question, serving and speed.
+- Not checked: DeepSeek's 2.25 bpw and UD-Q8_K_XL sets and long DeepSeek sessions, the other Qwen families on a Spark, the Mac-built engine against the Spark-built one for speed, long
   sessions, and `strata bench run` (the standard benchmark).
 - Not available: the Strata app, the `strata` Terminal and its `install.sh`, and the Docker images are for x86_64 only.
 
