@@ -8063,6 +8063,11 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
     step(4, "the DeepSeek engine")
     eng, meta, lib_dirs = ROOT / "engine", {"version": None}, []
     exe = dsv41_exe(eng)
+    if exe is None and ARM64_LINUX and not getattr(a, "dsv41_package", None):
+        # the DeepSeek engine packages are x86_64 only: a DGX Spark builds its own beside the Strata engine
+        fail("there is no ready-made DeepSeek engine for arm64 (a DGX Spark)",
+             f"build it with spark/build_engine.sh, which puts strata-dsv41 in its engine folder: copy that to {eng}, or point "
+             "STRATA_DSV41_EXE at the file, and run this again (docs/DGX_SPARK.md). Nothing has been downloaded.")
     if exe is None and not getattr(a, "dsv41_package", None) and not dsv41_engine_pending(eng) and not github_reachable():
         fail("Strata can't reach GitHub to download the DeepSeek engine.",
              "Check the internet connection and run the same command again. " + dsv41_manual_steps(eng))
@@ -8862,7 +8867,8 @@ def main() -> int:
     if pf is not None and pf < 4:
         warn(page_file_advice(pf, page_file_setting()))
     ok(f"CPU: {cpu} ({'arm64' if ARM64_LINUX else 'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
-    link = None if hip else pcie_link(int(gpu.get("index", 0)))
+    # (a unified-memory GPU - a DGX Spark's GB10 - is on the CPU's own link, not PCIe: nvidia-smi's "1.0 x1" there means nothing)
+    link = None if hip or gpu.get("uma") else pcie_link(int(gpu.get("index", 0)))
     if link is not None:
         line, problem = pcie_lines(link)
         ok(line)

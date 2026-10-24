@@ -56,6 +56,19 @@ class Spark(unittest.TestCase):
         self.assertNotIn("uma", g)
         self.assertAlmostEqual(g["vram_gb"], 32607 / 1024.0)
 
+    def test_deepseek_plan_counts_unified_memory_once(self):
+        # the GB10's experts are the RAM: no "fits" that counts the same memory twice; the rest is read from the SSD
+        from strata_control import dsv41_fit
+        g = {"index": 0, "name": "NVIDIA GB10", "vram_gb": 115.7, "arch": "121", "uma": True, "dedicated_gb": 0.0}
+        p = dsv41_fit.plan([g], 121.7, 3300, 8192, model="IST-DAS-2.00bpw")
+        self.assertEqual(p["verdict"], "tight")
+        self.assertEqual(p["spare_ram_gb"], 0.0)
+        self.assertLess(p["vram_experts_gb"], 115.7)                 # the engine leaves the OS its share (measured: 106.8 GB)
+        self.assertAlmostEqual(p["vram_experts_gb"] + p["cpu_experts_gb"], 132.1, delta=0.2)
+        self.assertTrue(any("unified memory" in line for line in p["lines"]))
+        d = dsv41_fit.plan([{**g, "uma": False}], 121.7, 3300, 8192, model="IST-DAS-2.00bpw")
+        self.assertEqual(d["verdict"], "fits")                        # a discrete card of that size: the old rule
+
     def test_na_memory_skipped_off_arm64(self):
         setup.ARM64_LINUX = False                           # an x86 PC keeps the old rule: a row it cannot read is skipped
         with mock.patch.object(setup, "out", return_value=SPARK_SMI):

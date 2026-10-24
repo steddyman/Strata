@@ -38,6 +38,7 @@ DENSE_GB = WEIGHTS_GB - EXPERTS_GB                       # 16.8
 DENSE_ON_GPU_GB = 15.5                # measured: 3.72 + 3.69 + 3.40 + 4.70 (the embedding table, ~1.3 GB, stays on the CPU)
 ENGRAM_GB = ENGRAM_BYTES / GB                            # 202.8
 DOWNLOAD_GB = MAIN_BYTES / GB                            # 508.4
+UMA_HEADROOM_GIB = 6.0               # a unified-memory GPU: what the engine leaves the OS (DS4_UMA_HEADROOM_GIB)
 RESERVE_GB = 1.15                     # per card: the 600 MiB the engine leaves free (--reserve-mib) and ~0.5 GB of its buffers
                                       # (measured: dense weights + experts + free = 33.8 of an R9700's 34.4 GB)
 REST_RAM_GB = 9.0                     # RAM the engine and the system keep besides the experts ("beside 9 GB for the rest")
@@ -74,6 +75,10 @@ ISTA_SETS = {
 }
 ISTA_DENSE_GB = 6.16                  # the dense weights in the shards (attention, router, shared experts, the head; the embedding stays on the CPU)
 ISTA_DENSE_ON_GPU_GB = 4.5            # what a card holds of them with a 12 GB card (measured on the 5070 / 3060: the engine places the rest itself)
+# Measured 2026-10-24 on one DGX Spark (GB10, 128 GB unified memory, the engine's unified-memory placement, src/dsv41 uma_free): 2.00 bpw with
+# 106.8 GB of experts on the GPU and 33.2 GB read from the SSD; medians of 6 short answers and 2 prompts of 3,709 tokens, temp 0
+ISTA_MEASURED_UMA = ("Measured on a DGX Spark (128 GB) with the 2.00 bpw set: answers 17 tokens a second just after the start, 28 once "
+                     "warm; a 3,700-token prompt read at about 175 tokens a second.")
 ISTA_MEASURED = ("an RTX 5070 (12 GB) with 64 GB of RAM and a 3.6 GB/s NVMe drive: answers about 4.7 tokens a second, a 4,000-token prompt "
                  "read at 121 tokens a second; an RTX 3060 (12 GB) with 46 GB of RAM: about 7.2 tokens a second; four Radeon AI PRO R9700 cards: "
                  "about 31 tokens a second")
@@ -158,6 +163,12 @@ def _tp_args(n_cards: int, tp: int) -> list[str]:
     return ["--tp", str(tp)] if tp > 1 or n_cards >= 2 else []
 
 
+def _all_ram(card: dict) -> bool:
+    """An NVIDIA unified-memory GPU (a DGX Spark's GB10): its memory is all of the RAM.  Not a Strix Halo (also "uma", an AMD gfx arch): its
+    GPU memory is a carve-out plus the GTT pool, and the RAM beside it still keeps the CPU's experts."""
+    return bool(card.get("uma")) and not str(card.get("arch") or "").startswith("gfx")
+
+
 def _plan_ista(model: str, cards: list[dict] | None, ram_gb: float | None, disk_free_gb: float | None, context: int,
                vendor: str | None) -> dict[str, Any]:
     """plan() for an official IST-DAS set (ISTA_SETS): the same keys, the measured speeds in plain words.  RAM classes: with RAM for every
@@ -190,7 +201,9 @@ def _plan_ista(model: str, cards: list[dict] | None, ram_gb: float | None, disk_
                      "measured with).")
     else:
         per_dense = ISTA_DENSE_ON_GPU_GB / n
-        cap = [max(0.0, _cap_gb(float(c.get("vram_gb") or 0)) - per_dense - RESERVE_GB) for c in keep]
+        # (an NVIDIA unified-memory GPU: the engine also leaves the OS 6 GiB of what Linux can give back, src/dsv41 uma_free)
+        cap = [max(0.0, _cap_gb(float(c.get("vram_gb") or 0)) - per_dense - RESERVE_GB - (_cap_gb(UMA_HEADROOM_GIB) if _all_ram(c) else 0.0))
+               for c in keep]
         vram_exp = min(v["experts_gb"], sum(cap))
         ranges = split_layers([float(c.get("vram_gb") or 0) for c in keep])
         in_vram = 0
@@ -211,7 +224,17 @@ def _plan_ista(model: str, cards: list[dict] | None, ram_gb: float | None, disk_
                      "CPU from RAM, and the ones RAM cannot hold are read from the SSD when a word needs them.")
         if n >= 2 and out["tp"] == 2:
             lines.append("Two cards share each layer's matrices (--tp 2): measured about twice as fast at reading prompts.")
-        if ram_gb:
+        if any(_all_ram(c) for c in keep) and ram_gb:
+            # one memory for the CPU and the GPU (a DGX Spark's GB10): the experts the GPU holds come out of the RAM, so the CPU's share
+            # is read from the SSD, not kept in RAM - "fits" there would count the same memory twice
+            out["ram_needed_gb"] = _round1(out["cpu_experts_gb"] + REST_RAM_GB)
+            out["spill_gb"] = _round1(out["cpu_experts_gb"])
+            out["spare_ram_gb"] = 0.0
+            out["verdict"] = "tight"
+            lines.append(f"This GPU shares one memory with the CPU (unified memory): the {out['vram_experts_gb']:.0f} GB of experts it holds "
+                         f"are that RAM, so the other {out['cpu_experts_gb']:.0f} GB are read from the SSD while it answers (the few the file "
+                         "cache keeps excepted). " + ISTA_MEASURED_UMA)
+        elif ram_gb:
             all_cached = out["cpu_experts_gb"] + REST_RAM_GB
             out["ram_needed_gb"] = _round1(all_cached)
             out["spill_gb"] = _round1(max(0.0, all_cached - float(ram_gb)))
