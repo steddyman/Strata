@@ -1,168 +1,226 @@
-# NVIDIA DGX Spark (GB10)
+# Strata on the NVIDIA DGX Spark
 
-Strata runs on an NVIDIA DGX Spark. **Status: experimental**, measured on one Spark (below). There is no ready-made
-engine, app or Terminal for it: you build the engine yourself, on the Spark (about 1.5 minutes) or on an Apple Silicon
-Mac, and start Strata with `./setup.sh`.
+Strata runs on an NVIDIA DGX Spark: one desktop box with a GB10 GPU, an Arm CPU (10 Cortex-X925 + 10 Cortex-A725) and
+128 GB of memory shared by both. It runs Qwen3.8-Flash-Next and DeepSeek-V4.1-Flash on a single Spark.
 
-What is different about the Spark:
+**Status: experimental.** Measured on one Spark. There is no ready-made engine, app or Terminal for the Spark: you build
+the engine (about 1.5 minutes on the Spark) and start Strata with `./setup.sh`.
 
-- **The CPU is ARM (arm64), not x86.** Strata's own CPU expert kernels are written for x86 (AVX2 and AVX-512). The arm64
-  build leaves them out. A model's CPU experts, if any, run on ggml-cpu's rows, which use the ARM vector unit (NEON).
-- **The GPU is a Blackwell GB10 with compute capability 12.1 (`sm_121`).** The RTX 50 cards are 12.0 (`sm_120`). The
-  engine is built for `sm_121`. The settings tuned on RTX 50 cards (`STRATA_SM120_PERF`) stay off on 12.1.
-- **The CPU and the GPU share one memory (128 GB).** `nvidia-smi` shows the GPU's memory as `[N/A]`. Setup counts all of
-  the RAM, less 6 GB for the system, as GPU memory, as it does for Strix Halo ([STRIX_HALO.md](STRIX_HALO.md)). The engine
-  sizes its expert cache from what Linux can give back (`MemAvailable` less 6 GiB, `STRATA_UMA_HEADROOM_GIB` changes it).
-  Setup adds `--mmap-experts` there: the experts are read from the model files in place instead of a second copy in RAM,
-  so the GPU's cache holds all of them (NVFP4: 24576 of 24576 experts, against 13702 with the RAM copy).
-- **Use a model that setup prepares.** These are "native" packs and run on any CPU. The old canonical Q2_0 pack (a pack
-  folder without `native_experts.txt`) needs an x86 CPU with AVX-512, and the engine stops with a message there.
+## Speeds at a glance
 
-## Build the engine on a Mac
+| Model | Answers | Reading your prompt | Context | Download | Quality |
+| --- | --- | --- | --- | --- | --- |
+| **Qwen3.8-Flash-Next NVFP4** | **44.7 tokens/s** | 1,330 tokens/s (4K) · 1,471 tokens/s (16K) | 128K, reads pictures | 128 GB | The best Qwen: closest to the full model |
+| **Qwen3.8-Flash-Next IQ3_XXS** | **51.1 tokens/s** | 1,266 tokens/s (4K) · 1,469 tokens/s (32K) | 64K as measured | 76 GB | 3-bit: smaller and faster, lower quality |
+| **DeepSeek-V4.1-Flash 1.75-bit** | **33 tokens/s** once warm (24 just after starting) | 195-300 tokens/s (3.7K) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
+| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 175 tokens/s (3.7K) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
 
-You need an Apple Silicon Mac with [Docker Desktop](https://www.docker.com/products/docker-desktop/). The Mac runs an
-arm64 Linux container with NVIDIA's CUDA 13.0 toolkit. This needs no emulation, and the compiler needs no GPU.
+On the same model file (IQ3_XXS) and the same Spark, Strata answers **1.4x faster** and reads a 32K prompt **1.7x
+faster** than llama.cpp v0.6.0 ([the comparison](../bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md)).
 
-1. In Docker Desktop, open **Settings > Resources** and give Docker as many CPUs and as much memory as you can spare. Each
-   compile job takes about 2-3 GB. With the default 2 CPUs and 8 GB the build is slow.
-2. In the Strata folder, run:
+\* Setup gives DeepSeek an 8K context. Coding agents need more: see
+[Give DeepSeek a longer context](#give-deepseek-a-longer-context).
 
-   ```sh
-   spark/build_on_mac.sh
-   ```
+"Answers" is how fast the reply is written. "Reading your prompt" is how fast Strata reads what you send before it
+starts to answer. All numbers are medians from one DGX Spark on 24 October 2026; the details are in
+[How these were measured](#how-these-were-measured).
 
-   The first build takes a while (it downloads the CUDA image, about 4 GB, and compiles every kernel). A second build
-   compiles only what changed. `BUILD_VISION=0 spark/build_on_mac.sh` builds without the picture reader, which is faster.
+## Which model should I pick?
 
-3. The engine is in `out-spark/engine/`, and the same folder packed as `out-spark/strata-spark-engine.tar.gz`.
+- **Qwen3.8-Flash-Next NVFP4** for most people. It is the closest to the full model, reads pictures, keeps every expert
+  on the GPU and reads prompts fastest. Setup lists it as `--family nvfp4 --model NVFP4`.
+- **Qwen3.8-Flash-Next IQ3_XXS** if you want the fastest answers or a smaller download, and can accept lower quality.
+- **DeepSeek-V4.1-Flash 1.75-bit** for a second, different model for code and agent work. It is faster than 2.00-bit on
+  a Spark because more of it fits on the GPU.
+- **DeepSeek-V4.1-Flash 2.00-bit** for better DeepSeek quality, a little slower.
 
-## Build the engine on the Spark itself
+DeepSeek's experts (115 GB at 1.75-bit, 132 GB at 2.00-bit) are bigger than the Spark's memory, so part of them is read
+from the SSD while it answers. That is why its first answers after a start are slower.
 
-DGX OS comes with the CUDA toolkit. Use CUDA 13.0 or 13.1 if you can: CUDA 13.2.0 and 13.2.1 made wrong answers on RTX 50
-cards (see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)); 13.2.2 is fixed.
+You can install several models. Only one runs at a time.
+
+## Get started
+
+### 1. Build the engine
+
+**On the Spark itself** (DGX OS comes with the CUDA toolkit):
 
 ```sh
-git clone https://github.com/steddyman/Strata.git && cd Strata
+git clone https://github.com/steddyman/Strata.git ~/Strata && cd ~/Strata
 sudo apt install build-essential python3-venv
 python3 -m venv .venv-build && .venv-build/bin/pip install -r requirements.txt -r requirements-build.txt
 PATH=$PWD/.venv-build/bin:$PATH PYTHON=$PWD/.venv-build/bin/python spark/build_engine.sh
 cp -r out-spark/engine ./engine
 ```
 
-You can also let setup compile it: `./setup.sh --build` (10-20 minutes, once).
+This builds both engines: Strata's (for Qwen) and DeepSeek's. `BUILD_DSV41=0` leaves DeepSeek's out. Use CUDA 13.0 or
+13.1 if you can: 13.2.0 and 13.2.1 made wrong answers on RTX 50 cards ([TROUBLESHOOTING.md](TROUBLESHOOTING.md)).
 
-## Install and start on the Spark
+**Or on an Apple Silicon Mac** with [Docker Desktop](https://www.docker.com/products/docker-desktop/): in the Strata
+folder run `spark/build_on_mac.sh`. It builds in an arm64 Linux container (no emulation, no GPU needed) and leaves
+`out-spark/strata-spark-engine.tar.gz`. Give Docker more CPUs and memory first (Settings > Resources) or it is slow.
+Copy the archive to the Spark and unpack it inside the Strata folder, so that the engine ends up as `~/Strata/engine`:
 
-1. Get this Strata folder onto the Spark: `git clone https://github.com/steddyman/Strata.git ~/Strata` (or copy it).
-2. Put the engine in the Strata folder as `engine/`. From the Mac:
+```sh
+scp out-spark/strata-spark-engine.tar.gz <you>@<spark>.local:~/
+ssh <you>@<spark>.local 'tar -xzf ~/strata-spark-engine.tar.gz -C ~/Strata && ls ~/Strata/engine/strata'
+```
 
-   ```sh
-   scp out-spark/strata-spark-engine.tar.gz spark:~/
-   ssh spark 'tar -xzf strata-spark-engine.tar.gz -C ~/Strata'
-   ```
+### 2. Install a model
 
-   Replace `spark` with your Spark's host name, and `~/Strata` with where the Strata folder is. The engine must end up
-   as `engine/` inside that folder: `ls ~/Strata/engine/strata` should list the file. If setup finds no engine there, it
-   says which folder it looked in and compiles one on the Spark instead (this needs the CUDA toolkit, which DGX OS has).
-3. On the Spark, in the Strata folder, run:
+On the Spark, in the Strata folder:
 
-   ```sh
-   ./setup.sh
-   ```
+```sh
+./setup.sh
+```
 
-   Setup finds the GB10, says "ready-made engine already installed" and installs NVIDIA's cuBLAS and CUDA runtime for
-   arm64 from pip. Then it asks for the model, the context and pictures, downloads the model and starts it, as on any PC.
-   The Strata page is at `http://127.0.0.1:8080`. To use it from another computer, see [INSTALL.md](INSTALL.md).
+Setup finds the GB10 and the engine, then asks which model, how much context and whether it should read pictures,
+downloads the model and starts it. To install DeepSeek, or another model later:
 
-## Using it from another computer
+```sh
+./setup.sh --setup                                                  # choose from the menu
+./setup.sh --setup --family deepseek41 --model IST-DAS-1.75bpw      # or name it
+```
 
-`127.0.0.1:8080` is the Spark itself: from your Mac it does not answer. Either forward the port over SSH (with NVIDIA Sync,
-`ssh -L 8080:127.0.0.1:8080 <user>@<spark>.local`, then open `http://127.0.0.1:8080` on the Mac), or let Strata listen on
-the network with an API key ([INSTALL.md](INSTALL.md)).
+### 3. Start it
 
-## Measured
+Each installed model has its own start script in the Strata folder, for example:
 
-One DGX Spark (GB10, 128 GB, DGX OS, driver 580.178.04), engine 0.1.48.1 built on the Spark with CUDA 13.0.88 for
-`sm_121`, NVFP4 (Maximilian228 Qwen3.8-Flash-Next-NVFP4-GPTQ), 128K context, 8-bit KV, images on. `tools/strata_bench.py`
-(`./bench.sh`) medians, 2026-10-24:
+```sh
+./run-nvfp4-nvfp4.sh
+./run-deepseek-v4.1-flash-ist-das-1.75bpw.sh
+```
+
+The model takes 1-3 minutes to load. The server says `ready:` when it is. Close the window or press Ctrl+C to stop it.
+
+A server started in an SSH session stops when that session closes. To keep it running, start it inside `tmux`
+(`tmux new -s strata`, then the script; detach with Ctrl+B then D, come back with `tmux attach -t strata`).
+
+## Use it from your Mac or another computer
+
+By default Strata only answers on the Spark itself (`127.0.0.1:8080`). To use it from other computers on your network,
+set it up with an address and an API key (pick your own key):
+
+```sh
+./setup.sh --setup --family nvfp4 --model NVFP4 --host 0.0.0.0 --api-key <your-key>
+```
+
+The same `--host` and `--api-key` work with any model. They are saved in the model's `strata-*.json` file in the Strata
+folder (`"host"` and `"api_key"`), which you can also edit by hand. Then, from your Mac:
+
+- the chat page: `http://<spark>.local:8080/`
+- OpenAI-compatible apps: base URL `http://<spark>.local:8080/v1` with your key
+- Anthropic-compatible apps: `http://<spark>.local:8080/v1/messages` with your key
+
+Quick check from the Mac: `curl http://<spark>.local:8080/v1/models -H "Authorization: Bearer <your-key>"`.
+
+Without opening it to the network, you can also forward the port over SSH:
+`ssh -N -L 8080:127.0.0.1:8080 <you>@<spark>.local`, then use `http://127.0.0.1:8080` on the Mac.
+
+## Give DeepSeek a longer context
+
+Setup gives DeepSeek 8K tokens of context, the size its engine was first checked at. Coding agents send far more than
+that (their instructions and tools alone can be several thousand tokens). Install it with a larger context:
+
+```sh
+./setup.sh --setup --family deepseek41 --model IST-DAS-1.75bpw --context 131072
+```
+
+Setup warns that sizes above 64K were not tested by the DeepSeek release. On a Spark, 1.75-bit at 128K started with
+0.12 GB of extra memory and read a 30,965-token prompt correctly (403 tokens/s, answering at 23 tokens/s). 2.00-bit at
+128K was not tried.
+
+## How Strata works on the Spark
+
+- **The CPU is Arm (arm64), not x86.** Strata's own CPU expert kernels are written for x86 (AVX2 and AVX-512); the arm64
+  build leaves them out. A model's CPU experts, if any, run on ggml-cpu's rows, which use the Arm vector unit (NEON).
+- **The GPU is a Blackwell GB10 (compute capability 12.1, `sm_121`).** The RTX 50 cards are 12.0 (`sm_120`). The engine
+  is built for `sm_121`. The settings tuned on RTX 50 cards (`STRATA_SM120_PERF`) stay off on 12.1.
+- **The CPU and the GPU share one memory.** `nvidia-smi` shows the GPU's memory as `[N/A]`. Setup counts all of the RAM,
+  less 6 GB for the system, as GPU memory, as it does for Strix Halo ([STRIX_HALO.md](STRIX_HALO.md)). Setup adds
+  `--mmap-experts` there: the experts are read from the model files in place instead of copied into RAM first, so the
+  GPU's cache holds all of them (NVFP4: 24,576 of 24,576 experts, against 13,702 with the RAM copy). DeepSeek's engine
+  sizes its GPU share from what Linux can give back, less 6 GiB (`DS4_UMA_HEADROOM_GIB`): 107 GB of experts on the GPU.
+- **Use a model that setup prepares.** These run on any CPU. The old canonical Q2_0 pack (a pack folder without
+  `native_experts.txt`) needs an x86 CPU with AVX-512, and the engine stops with a message there.
+- **Not available on the Spark:** the Strata app, the `strata` Terminal and its `install.sh`, and the Docker images,
+  which are x86_64 only.
+
+## How these were measured
+
+One DGX Spark (GB10, 128 GB, DGX OS, kernel 7.0.0-1019-nvidia, driver 580.178.04), engines built on the Spark with CUDA
+13.0.88 for `sm_121`, 24 October 2026. Every number is the server's own timing, medians.
+
+### Qwen3.8-Flash-Next NVFP4
+
+Maximilian228's GPTQ pack, 128K context, 8-bit KV cache, pictures on, `tools/strata_bench.py` (`./bench.sh`): 9 chat
+replies, 3 prompts each of 4K and 16K tokens, 15 agent turns.
 
 | | experts copied to RAM (before) | `--mmap-experts` (setup's default here) | the same on engine 0.1.49.2, tuned |
 | --- | --- | --- | --- |
-| experts in the GPU's cache | 13702 of 24576 | 24576 of 24576 | 24576 of 24576 |
-| chat output | 40.6 tok/s | 44.4 tok/s | 44.7 tok/s |
-| 4K prompt | 1222 tok/s | 1322 tok/s | 1330 tok/s |
-| 16K prompt | 1397 tok/s | 1471 tok/s | 1471 tok/s |
+| experts in the GPU's cache | 13,702 of 24,576 | 24,576 of 24,576 | 24,576 of 24,576 |
+| chat replies | 40.6 tokens/s | 44.4 tokens/s | 44.7 tokens/s |
+| 4K prompt | 1,222 tokens/s | 1,322 tokens/s | 1,330 tokens/s |
+| 16K prompt | 1,397 tokens/s | 1,471 tokens/s | 1,471 tokens/s |
 | first token, 16K prompt | 11.55 s | 10.97 s | 10.96 s |
-| agent turns, output | 43.6 tok/s | 43.1 tok/s | 44.6 tok/s |
+| agent turns, replies | 43.6 tokens/s | 43.1 tokens/s | 44.6 tokens/s |
 
-The last column is the 0.2.4 release's engine (0.1.49.2) with setup's tuning (`--pool-workers 4`, below), the same day:
-the same speed within the runs' spread.
+The first two columns are engine 0.1.48.1. Setup's tuning chose `--pool-workers 4` (43.9 tokens/s in its own
+measurement); its PCIe-share step changes nothing here (44.0-44.2 tokens/s at every value), because every expert is
+already on the GPU.
 
-Setup's tuning then chose `--pool-workers 4` (43.9 tok/s in its own measurement). Its PCIe-share step measures nothing
-here (44.0-44.2 tok/s at every value): every expert is already on the GPU.
+Prompt reading is about 55% of an RTX card that holds the whole model ([NVFP4.md](NVFP4.md): 2,503 tokens/s at 4-8K):
+the GB10 has 48 SMs and 273 GB/s of memory bandwidth. The Blackwell FP4 prompt mode (`STRATA_PREFILL_NVFP4=w4a4`) runs on
+it but is not faster (870-1,159 against 1,012-1,113 tokens/s on three ~10K-token prompts), so the default stays.
 
-Prompt reading is about 55% of an RTX card that holds the whole model (docs/NVFP4.md: 2,503 tok/s, 4-8K prompts): the GB10
-has 48 SMs and 273 GB/s of LPDDR5X. The Blackwell FP4 prompt mode (`STRATA_PREFILL_NVFP4=w4a4`) runs on it (`sm_121a`)
-but is not faster here: 870-1,159 tok/s against 1,012-1,113 with the default `w4a8` on three ~10K-token prompts of
-random words, so the default stays.
+### Qwen3.8-Flash-Next IQ3_XXS, and against llama.cpp
 
-**Against llama.cpp** (v0.6.0, every layer on the GPU, same IQ3_XXS GGUF, same prompts;
-[bench/results/2026-10-24-dgx-spark-vs-llamacpp](../bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md)): Strata reads
-prompts 1.33x (4K) to 1.68x (32K) faster and decodes 1.28x to 1.52x faster than llama.cpp's faster setting (with its MTP
-head for decode, without for prompts). At 4K, temp 0: 1266 vs 952 tok/s prompt, 51.1 vs 36.2 tok/s decode.
+ISTA-DASLab's GSQ-RCO IQ3_XXS GGUF, read by both engines, 64K context, pictures off, engine 0.1.48.1. The method of
+[the 2026-10-06 comparison](../bench/results/2026-10-06-llamacpp-0.6.0/README.md): 3 rounds, 256-token replies,
+temperature 0 unless noted; full results in
+[bench/results/2026-10-24-dgx-spark-vs-llamacpp](../bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md).
 
-Answers and pictures were checked by hand: a factual question with a code answer, and a picture of a red square and a blue
-circle, described correctly.
+| | Strata | llama.cpp v0.6.0 | llama.cpp with its MTP head |
+| --- | --- | --- | --- |
+| replies after a 4K prompt | **51.1 tokens/s** (46.7 at temperature 0.7) | 29.7 tokens/s | 36.2 tokens/s |
+| replies after a 32K prompt | **52.8 tokens/s** (38.9 at temperature 0.7) | 25.1 tokens/s | 34.7 tokens/s |
+| reading a 4K prompt | **1,266 tokens/s** | 952 tokens/s | 881 tokens/s |
+| reading a 32K prompt | **1,469 tokens/s** | 872 tokens/s | 778 tokens/s |
 
-## DeepSeek-V4.1-Flash on a Spark
+llama.cpp ran with every layer on the GPU (`-ngl 99 -b 2048 -ub 2048`, 8-bit KV, flash attention); its settings were not
+tuned for the Spark.
 
-DeepSeek has its own engine, `strata-dsv41`. `spark/build_engine.sh` builds it beside the Strata engine (`BUILD_DSV41=0`
-leaves it out), and setup takes `engine/strata-dsv41` from there: the ready-made DeepSeek engine packages are x86_64
-only, so on arm64 setup never downloads one and says how to build it instead.
+### DeepSeek-V4.1-Flash
 
-```sh
-./setup.sh --setup --family deepseek41 --model IST-DAS-2.00bpw
-```
+IST-DAS 1.75-bit and 2.00-bit sets, setup's configuration (8K context, DSpark drafter on), engine 0.1.49.2, temperature
+0, no thinking. Each run: 6 short questions (256-token replies) and 2 prompts of 3,709 tokens.
 
-Its experts are bigger than a Spark's memory (1.75 bpw: 115 GB, 2.00 bpw: 132 GB, 2.25 bpw: 149 GB, plus a 111 GB n-gram
-table that always stays on the SSD), so part of them is always read from the SSD while it answers. What the arm64 build
-changes for it:
-
-- **Unified memory.** The engine sized its GPU share from `cudaMemGetInfo`, which on the GB10 counts only free memory, not
-  the page cache Linux gives back. After setup had read the model files it saw 55 GB and put 42 GB of experts on the GPU
-  (4,840 of 15,360); 91 GB ran on the Arm cores. With memory empty (after a restart) the same engine placed experts against
-  the whole memory beside its RAM store and **was killed by the kernel's out-of-memory killer** at the start. On an
-  integrated GPU on Linux it now counts what Linux can still give back, less 6 GiB (`DS4_UMA_HEADROOM_GIB`), as Strata's own
-  engine does: 106.8 GB of experts on the GPU (11,894 of 15,744 with the drafter's), 33.2 GB from the SSD, both after a
-  restart and with a full page cache.
-- **Setup's plan** for DeepSeek counts the GB10's memory once: the GPU's experts are the RAM, the rest comes from the SSD.
-
-Measured on the same Spark, IST-DAS 2.00 bpw (and 1.75 bpw, last rows), engine 0.1.49.2, 8K context, DSpark drafter on (setup's config), temp 0, no thinking:
-6 short questions (256 tokens) and 2 prompts of 3,709 tokens, medians, the server's own timings, 2026-10-24:
-
-| | answers, short questions | 3,709-token prompt read | answers after it |
+| | replies, short questions | reading a 3,709-token prompt | replies after it |
 | --- | ---: | ---: | ---: |
-| started after a restart (cold page cache) | 17.4 tok/s (12.2-26.3, rising as it warms) | 175.1 tok/s | 17.5 tok/s |
-| started with the model files in the page cache | 28.4 tok/s (15.2-40.8) | 174.7 tok/s | 17.1 tok/s |
-| before the change, page cache full: 42 GB on the GPU (2 requests) | 10.4 and 12.2 tok/s | - | - |
-| **1.75 bpw**, started with memory empty: 107.3 GB on the GPU, 15.2 GB from the SSD | 23.5 tok/s (19.4-36.3) | 207.4 tok/s | 22.8 tok/s |
-| **1.75 bpw**, the same server's second run | 33.0 tok/s (22.7-43.5) | 298.5 tok/s | 21.1 tok/s |
-| before the change, memory empty | killed at start (out of memory) | - | - |
+| **1.75-bit**, started with memory empty (107.3 GB of experts on the GPU, 15.2 GB from the SSD) | 23.5 tokens/s (19.4-36.3) | 207.4 tokens/s | 22.8 tokens/s |
+| **1.75-bit**, the same server's second run | 33.0 tokens/s (22.7-43.5) | 298.5 tokens/s | 21.1 tokens/s |
+| **1.75-bit**, the engine built on a Mac (`spark/build_on_mac.sh`) | 26.7 tokens/s | 193.9 tokens/s | 20.8 tokens/s |
+| **2.00-bit**, started with memory empty (106.8 GB on the GPU, 33.2 GB from the SSD) | 17.4 tokens/s (12.2-26.3) | 175.1 tokens/s | 17.5 tokens/s |
+| **2.00-bit**, started with the model files cached | 28.4 tokens/s (15.2-40.8) | 174.7 tokens/s | 17.1 tokens/s |
 
-The 1.75 bpw set keeps more of its experts on the GPU and is faster here, at a lower quality (perplexity +21% against
-+15.5% for 2.00, and noticeably weaker on plain prose; setup's menu says the same). For comparison, the release notes
-measured 4.7 tok/s on an RTX 5070 with 64 GB of RAM. Answers were read by hand: correct
-(the Fibonacci function, a hash table explained). The DSpark drafter accepted 80-95% of its tokens on these questions.
+Replies get faster as a model warms up, because the experts it reads from the SSD stay in memory. The DSpark drafter
+accepted 80-95% of its tokens on these questions. For comparison, the DeepSeek release measured 4.7 tokens/s on an RTX
+5070 with 64 GB of RAM.
+
+The 1.75-bit set at 128K context (`--max-context 131072`): one 30,965-token prompt read in 77 s (403 tokens/s), reply at
+23.2 tokens/s, the document's last line quoted correctly.
+
+Before the arm64 build's change to DeepSeek's memory placement, the same engine put only 42 GB of experts on the GPU when
+the page cache was full (10-12 tokens/s), and was killed by Linux's out-of-memory killer when memory was empty.
 
 ## What was checked, and what was not
 
-- Checked: the engine (`strata`, `libstrata_kq.so`) and the picture reader (`strata-vision`) compile and link for arm64
-  with CUDA 13.0 for `sm_121`, in the container `spark/build_on_mac.sh` uses. Setup's handling of the GB10 and of the
-  arm64 CPU has tests: `python -m unittest tools.test_setup_spark`.
-- Checked on a DGX Spark: setup, the start, tuning, `./bench.sh`, chat and pictures with NVFP4 (above).
-- Checked on a DGX Spark: DeepSeek-V4.1-Flash IST-DAS 2.00 and 1.75 bpw (above): setup, its test question, serving and speed.
-- Not checked: DeepSeek's 2.25 bpw and UD-Q8_K_XL sets and long DeepSeek sessions, the other Qwen families on a Spark, the Mac-built engine against the Spark-built one for speed, long
-  sessions, and `strata bench run` (the standard benchmark).
-- Not available: the Strata app, the `strata` Terminal and its `install.sh`, and the Docker images are for x86_64 only.
+- Checked on a DGX Spark: setup, starting, tuning, `./bench.sh`, chat, pictures and tool calls with Qwen NVFP4; Qwen
+  IQ3_XXS in the llama.cpp comparison; DeepSeek 1.75-bit and 2.00-bit setup, chat, tool calls and speed; requests from
+  another computer on the network with an API key.
+- Checked: the engines build for arm64 with CUDA 13.0 on the Spark and on a Mac (`spark/build_on_mac.sh`). Setup's GB10
+  and arm64 handling has tests: `python -m unittest tools.test_setup_spark`.
+- Not checked: DeepSeek 2.25-bit and UD-Q8_K_XL, DeepSeek 2.00-bit at 128K context, the other Qwen families on a Spark,
+  long sessions, and `strata bench run` (the standard benchmark).
 
-If you run it, please report what you see: [COMMUNITY_BENCHMARKS.md](COMMUNITY_BENCHMARKS.md).
+If you run Strata on a Spark, please share what you see: [COMMUNITY_BENCHMARKS.md](COMMUNITY_BENCHMARKS.md).

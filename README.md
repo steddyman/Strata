@@ -7,11 +7,40 @@
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
-> **This is the NVIDIA DGX Spark fork of Strata.** It adds the DGX Spark (GB10 GPU, arm64 CPU, 128 GB of unified memory):
-> Qwen3.8-Flash-Next and DeepSeek-V4.1-Flash on one Spark, at 44.7 tokens/s (NVFP4) and up to 33 tokens/s (DeepSeek
-> 1.75-bit). Start with **[docs/DGX_SPARK.md](docs/DGX_SPARK.md)**. Everything else here is upstream
-> [Niko1221/Strata](https://github.com/Niko1221/Strata) (MIT): its ready-made downloads below are for PCs and Macs, not
-> the Spark. Experimental, community-maintained, not an official Strata or NVIDIA release.
+## Strata on the NVIDIA DGX Spark
+
+**This fork runs Strata on an NVIDIA DGX Spark**: one desktop box with a GB10 GPU, an Arm CPU and 128 GB of memory
+shared by both. It runs Qwen3.8-Flash-Next (a 125-billion-parameter model) and DeepSeek-V4.1-Flash on a single Spark,
+with every Qwen expert on the GPU.
+
+<p align="center"><img src="docs/media/dgx-spark-speeds.png" width="800" alt="Strata on NVIDIA DGX Spark: Qwen3.8-Flash-Next NVFP4 at 44.7 tokens a second and 1,471 tokens a second prompt reading; DeepSeek-V4.1-Flash 1.75-bit at 33 tokens a second; 1.4 times faster output and 1.7 times faster prompt reading than llama.cpp on the same model file"></p>
+
+**Speed on one DGX Spark**
+
+| Model | Answers | Reading your prompt | Context | Download | Quality |
+| --- | --- | --- | --- | --- | --- |
+| **Qwen3.8-Flash-Next NVFP4** | **44.7 tokens/s** | 1,330 tokens/s (4K) · 1,471 tokens/s (16K) | 128K, reads pictures | 128 GB | The best Qwen: closest to the full model |
+| **Qwen3.8-Flash-Next IQ3_XXS** | **51.1 tokens/s** | 1,266 tokens/s (4K) · 1,469 tokens/s (32K) | 64K as measured | 76 GB | 3-bit: smaller and faster, lower quality |
+| **DeepSeek-V4.1-Flash 1.75-bit** | **33 tokens/s** once warm (24 just after starting) | 195-300 tokens/s (3.7K) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
+| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 175 tokens/s (3.7K) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
+
+On the same model file and the same Spark, Strata answers **1.4x faster** and reads long prompts **1.7x faster** than
+llama.cpp ([the comparison](bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md)).
+
+\* Setup gives DeepSeek an 8K context. Coding agents need more: the guide shows how to raise it to 128K, which was
+tested with the 1.75-bit set (a 31,000-token prompt read correctly).
+
+Medians measured on one DGX Spark on 24 October 2026; how each number was measured is in
+[the DGX Spark guide](docs/DGX_SPARK.md#how-these-were-measured).
+
+**Start here: [docs/DGX_SPARK.md](docs/DGX_SPARK.md)**: which model to pick, how to build and install it, and how to
+use it from your Mac or PC.
+
+This is a community fork of [Niko1221/Strata](https://github.com/Niko1221/Strata) (MIT). It is experimental and not an
+official Strata or NVIDIA release. Everything below is upstream Strata's own README: its ready-made downloads are for
+PCs and Macs, not the Spark.
+
+---
 
 <h3 align="center">Run a state-of-the-art model on your own gaming PC</h3>
 
@@ -278,9 +307,8 @@ right away. Which size fits your Mac: [docs/MAC.md](docs/MAC.md).
 
 **NVIDIA DGX Spark (GB10, arm64), experimental:** the app, the Terminal and the ready-made engines are x86_64 only, so on
 a Spark you build the engine (on the Spark in about 1.5 minutes, or on an Apple Silicon Mac with `spark/build_on_mac.sh`)
-and run `./setup.sh`. Setup sees the GB10's unified memory and keeps every expert in the GPU's share of it. Measured on one
-Spark with NVFP4: 44 tok/s output, about 1,300-1,500 tok/s reading 4K-16K prompts. Steps and numbers:
-[docs/DGX_SPARK.md](docs/DGX_SPARK.md).
+and run `./setup.sh`. The speed of each model is at the [top of this README](#strata-on-the-nvidia-dgx-spark); the steps are
+in [docs/DGX_SPARK.md](docs/DGX_SPARK.md).
 
 The installer finds your card and sets up the right engine. It asks which model and size, how much context (how much text
 the model keeps in mind) and whether it should read pictures. Press Enter for the recommended answer. Then it downloads the
