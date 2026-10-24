@@ -42,7 +42,7 @@ DGX OS comes with the CUDA toolkit. Use CUDA 13.0 or 13.1 if you can: CUDA 13.2.
 cards (see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)); 13.2.2 is fixed.
 
 ```sh
-git clone https://github.com/Niko1221/Strata.git && cd Strata
+git clone https://github.com/steddyman/Strata.git && cd Strata
 sudo apt install build-essential python3-venv
 python3 -m venv .venv-build && .venv-build/bin/pip install -r requirements.txt -r requirements-build.txt
 PATH=$PWD/.venv-build/bin:$PATH PYTHON=$PWD/.venv-build/bin/python spark/build_engine.sh
@@ -53,7 +53,7 @@ You can also let setup compile it: `./setup.sh --build` (10-20 minutes, once).
 
 ## Install and start on the Spark
 
-1. Get this Strata folder onto the Spark (`git clone` it, or copy it).
+1. Get this Strata folder onto the Spark: `git clone https://github.com/steddyman/Strata.git ~/Strata` (or copy it).
 2. Put the engine in the Strata folder as `engine/`. From the Mac:
 
    ```sh

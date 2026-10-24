@@ -7,6 +7,12 @@
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
+> **This is the NVIDIA DGX Spark fork of Strata.** It adds the DGX Spark (GB10 GPU, arm64 CPU, 128 GB of unified memory):
+> Qwen3.8-Flash-Next and DeepSeek-V4.1-Flash on one Spark, at 44.7 tokens/s (NVFP4) and up to 33 tokens/s (DeepSeek
+> 1.75-bit). Start with **[docs/DGX_SPARK.md](docs/DGX_SPARK.md)**. Everything else here is upstream
+> [Niko1221/Strata](https://github.com/Niko1221/Strata) (MIT): its ready-made downloads below are for PCs and Macs, not
+> the Spark. Experimental, community-maintained, not an official Strata or NVIDIA release.
+
 <h3 align="center">Run a state-of-the-art model on your own gaming PC</h3>
 
 <p align="center">Support for NVIDIA, AMD, Intel · Windows, Linux, Mac · free and open source</p>
