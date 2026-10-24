@@ -1,8 +1,8 @@
 # NVIDIA DGX Spark (GB10)
 
-Strata can run on an NVIDIA DGX Spark. **Status: experimental.** The engine builds for it, but nobody has measured it on a
-Spark yet. There is no ready-made engine, app or Terminal for it: you build the engine yourself, on the Spark or on an
-Apple Silicon Mac, and start Strata with `./setup.sh`.
+Strata runs on an NVIDIA DGX Spark. **Status: experimental**, measured on one Spark (below). There is no ready-made
+engine, app or Terminal for it: you build the engine yourself, on the Spark (about 1.5 minutes) or on an Apple Silicon
+Mac, and start Strata with `./setup.sh`.
 
 What is different about the Spark:
 
@@ -13,6 +13,8 @@ What is different about the Spark:
 - **The CPU and the GPU share one memory (128 GB).** `nvidia-smi` shows the GPU's memory as `[N/A]`. Setup counts all of
   the RAM, less 6 GB for the system, as GPU memory, as it does for Strix Halo ([STRIX_HALO.md](STRIX_HALO.md)). The engine
   sizes its expert cache from what Linux can give back (`MemAvailable` less 6 GiB, `STRATA_UMA_HEADROOM_GIB` changes it).
+  Setup adds `--mmap-experts` there: the experts are read from the model files in place instead of a second copy in RAM,
+  so the GPU's cache holds all of them (NVFP4: 24576 of 24576 experts, against 13702 with the RAM copy).
 - **Use a model that setup prepares.** These are "native" packs and run on any CPU. The old canonical Q2_0 pack (a pack
   folder without `native_experts.txt`) needs an x86 CPU with AVX-512, and the engine stops with a message there.
 
@@ -72,13 +74,41 @@ You can also let setup compile it: `./setup.sh --build` (10-20 minutes, once).
    arm64 from pip. Then it asks for the model, the context and pictures, downloads the model and starts it, as on any PC.
    The Strata page is at `http://127.0.0.1:8080`. To use it from another computer, see [INSTALL.md](INSTALL.md).
 
+## Using it from another computer
+
+`127.0.0.1:8080` is the Spark itself: from your Mac it does not answer. Either forward the port over SSH (with NVIDIA Sync,
+`ssh -L 8080:127.0.0.1:8080 <user>@<spark>.local`, then open `http://127.0.0.1:8080` on the Mac), or let Strata listen on
+the network with an API key ([INSTALL.md](INSTALL.md)).
+
+## Measured
+
+One DGX Spark (GB10, 128 GB, DGX OS, driver 580.178.04), engine 0.1.48.1 built on the Spark with CUDA 13.0.88 for
+`sm_121`, NVFP4 (Maximilian228 Qwen3.8-Flash-Next-NVFP4-GPTQ), 128K context, 8-bit KV, images on. `tools/strata_bench.py`
+(`./bench.sh`) medians, 2026-10-24:
+
+| | experts copied to RAM (before) | `--mmap-experts` (setup's default here) |
+| --- | --- | --- |
+| experts in the GPU's cache | 13702 of 24576 | 24576 of 24576 |
+| chat output | 40.6 tok/s | 44.4 tok/s |
+| 4K prompt | 1222 tok/s | 1322 tok/s |
+| 16K prompt | 1397 tok/s | 1471 tok/s |
+| first token, 16K prompt | 11.55 s | 10.97 s |
+| agent turns, output | 43.6 tok/s | 43.1 tok/s |
+
+Setup's tuning then chose `--pool-workers 4` (43.9 tok/s in its own measurement). Its PCIe-share step measures nothing
+here (44.0-44.2 tok/s at every value): every expert is already on the GPU.
+
+Answers and pictures were checked by hand: a factual question with a code answer, and a picture of a red square and a blue
+circle, described correctly.
+
 ## What was checked, and what was not
 
 - Checked: the engine (`strata`, `libstrata_kq.so`) and the picture reader (`strata-vision`) compile and link for arm64
   with CUDA 13.0 for `sm_121`, in the container `spark/build_on_mac.sh` uses. Setup's handling of the GB10 and of the
   arm64 CPU has tests: `python -m unittest tools.test_setup_spark`.
-- Not checked: running on a real DGX Spark. No speed has been measured. The memory plan (how much of the 128 GB goes to
-  the expert cache) uses the same rules as Strix Halo and may need tuning there.
+- Checked on a DGX Spark: setup, the start, tuning, `./bench.sh`, chat and pictures with NVFP4 (above).
+- Not checked: the other model families on a Spark, the Mac-built engine against the Spark-built one for speed, long
+  sessions, and `strata bench run` (the standard benchmark).
 - Not available: the Strata app, the `strata` Terminal and its `install.sh`, and the Docker images are for x86_64 only.
 
 If you run it, please report what you see: [COMMUNITY_BENCHMARKS.md](COMMUNITY_BENCHMARKS.md).
