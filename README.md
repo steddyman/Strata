@@ -7,6 +7,12 @@
 
 <p align="center"><b>English</b> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a> · <a href="README.de.md">Deutsch</a> · <a href="README.fr.md">Français</a> · <a href="README.es.md">Español</a> · <a href="README.pt-BR.md">Português</a></p>
 
+> **This is the NVIDIA DGX Spark fork of Strata.** It adds the DGX Spark (GB10 GPU, arm64 CPU, 128 GB of unified memory):
+> Qwen3.8-Flash-Next and DeepSeek-V4.1-Flash on one Spark, at 44.7 tokens/s (NVFP4) and up to 33 tokens/s (DeepSeek
+> 1.75-bit). Start with **[docs/DGX_SPARK.md](docs/DGX_SPARK.md)**. Everything else here is upstream
+> [Niko1221/Strata](https://github.com/Niko1221/Strata) (MIT): its ready-made downloads below are for PCs and Macs, not
+> the Spark. Experimental, community-maintained, not an official Strata or NVIDIA release.
+
 <h3 align="center">Run a state-of-the-art model on your own gaming PC</h3>
 
 <p align="center">Support for NVIDIA, AMD, Intel · Windows, Linux, Mac · free and open source</p>
@@ -53,6 +59,7 @@ memory. A 32 GB PC with a 12-16 GB card runs the smaller sizes, and 64 GB runs e
 | **Intel** Arc | [Intel Arc](docs/INTEL_ARC.md) |
 | **Apple Silicon Mac**, M1 or newer, macOS 15 or newer | [Mac](docs/MAC.md) |
 | **AMD Ryzen AI Max (Strix Halo)** and other unified-memory PCs | [Strix Halo](docs/STRIX_HALO.md) |
+| **NVIDIA DGX Spark** (GB10, arm64), experimental, built from source | [DGX Spark](docs/DGX_SPARK.md) |
 | Older cards and processors | [Older GPUs](docs/OLDER_GPUS.md) |
 
 You also need about 80 GB of free disk (an SSD), Windows 10 / 11, Linux or macOS, and a current graphics driver. Two or
@@ -268,6 +275,12 @@ and `strata connect opencode --write` writes them for you (with a backup).
 (Xcode itself is not needed). Open Terminal in the Strata folder and run `./setup.sh`. It builds the Mac engine on your
 Mac (about 7 minutes), asks the same questions, downloads the model and starts it. Next time, `./setup.sh` starts it
 right away. Which size fits your Mac: [docs/MAC.md](docs/MAC.md).
+
+**NVIDIA DGX Spark (GB10, arm64), experimental:** the app, the Terminal and the ready-made engines are x86_64 only, so on
+a Spark you build the engine (on the Spark in about 1.5 minutes, or on an Apple Silicon Mac with `spark/build_on_mac.sh`)
+and run `./setup.sh`. Setup sees the GB10's unified memory and keeps every expert in the GPU's share of it. Measured on one
+Spark with NVFP4: 44 tok/s output, about 1,300-1,500 tok/s reading 4K-16K prompts. Steps and numbers:
+[docs/DGX_SPARK.md](docs/DGX_SPARK.md).
 
 The installer finds your card and sets up the right engine. It asks which model and size, how much context (how much text
 the model keeps in mind) and whether it should read pictures. Press Enter for the recommended answer. Then it downloads the

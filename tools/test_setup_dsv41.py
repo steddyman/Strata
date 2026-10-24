@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import setup  # noqa: E402
+
+setup.ARM64_LINUX = False   # these are an x86_64 PC's steps (the engine from the feed); an arm64 DGX Spark's: tools/test_setup_spark.py
 from strata_control import dsv41_fit  # noqa: E402
 
 SHA = re.compile(r"/resolve/[0-9a-f]{40}/")
@@ -232,6 +234,18 @@ class Install(unittest.TestCase):
         self.assertIn("RTX 30", out)
         self.assertNotIn("cmake", out)
         self.assertNotIn("STRATA_DSV41_EXE", out)
+        self.assertIn("Nothing has been downloaded", out)
+        self.assertFalse([c for c in self.calls if c[0] == "get"])
+
+    def test_arm64_says_how_to_build_the_engine_before_any_download(self):
+        # a DGX Spark: the DeepSeek engine packages are x86_64 only, so the feed is not asked (nor GitHub) and the step names the build
+        self.github_up = False
+        with mock.patch.object(setup, "ARM64_LINUX", True):
+            rc, out = self.install(engine=False)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no ready-made DeepSeek engine for arm64", out)
+        self.assertIn("spark/build_engine.sh", out)
+        self.assertNotIn("can't reach GitHub", out)
         self.assertIn("Nothing has been downloaded", out)
         self.assertFalse([c for c in self.calls if c[0] == "get"])
 
