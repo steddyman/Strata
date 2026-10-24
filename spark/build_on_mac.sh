@@ -38,7 +38,7 @@ docker run --rm --platform linux/arm64 \
     spark/build_engine.sh
     chown -R "$HOST_UID:$HOST_GID" out-spark build-spark build-vision-spark third_party 2>/dev/null || true
   '
-tar -C "$repo/out-spark" -czf "$repo/out-spark/strata-spark-engine.tar.gz" engine
+COPYFILE_DISABLE=1 tar -C "$repo/out-spark" -czf "$repo/out-spark/strata-spark-engine.tar.gz" engine
 echo
 echo "Engine for the DGX Spark: $repo/out-spark/engine"
 echo "Unpack it INTO the Strata folder on the Spark, so that it becomes <Strata folder>/engine (docs/DGX_SPARK.md), e.g."
