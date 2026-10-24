@@ -103,6 +103,11 @@ has 48 SMs and 273 GB/s of LPDDR5X. The Blackwell FP4 prompt mode (`STRATA_PREFI
 but is not faster here: 870-1,159 tok/s against 1,012-1,113 with the default `w4a8` on three ~10K-token prompts of
 random words, so the default stays.
 
+**Against llama.cpp** (v0.6.0, every layer on the GPU, same IQ3_XXS GGUF, same prompts;
+[bench/results/2026-10-24-dgx-spark-vs-llamacpp](../bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md)): Strata reads
+prompts 1.33x (4K) to 1.68x (32K) faster and decodes 1.28x to 1.52x faster than llama.cpp's faster setting (with its MTP
+head for decode, without for prompts). At 4K, temp 0: 1266 vs 952 tok/s prompt, 51.1 vs 36.2 tok/s decode.
+
 Answers and pictures were checked by hand: a factual question with a code answer, and a picture of a red square and a blue
 circle, described correctly.
 

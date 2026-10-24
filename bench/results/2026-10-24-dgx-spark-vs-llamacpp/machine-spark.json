@@ -1,0 +1,13 @@
+{
+ "gguf": "~/Apps/Strata-data/models/IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+ "llama_server": "~/llamacpp/src/build/bin/llama-server",
+ "strata_cfg": "~/Strata/strata-iq3_xxs.json",
+ "serve": "~/Strata/serve",
+ "cwd": "~/Strata",
+ "configs": [
+  {"name": "strata-setup", "kind": "strata", "args": []},
+  {"name": "llama-gpu", "kind": "llama", "args": ["-ngl", "99", "-b", "2048", "-ub", "2048", "-c", "65536", "-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on"]},
+  {"name": "llama-gpu-mtp3", "kind": "llama", "args": ["-ngl", "99", "-b", "2048", "-ub", "2048", "-c", "65536", "-ctk", "q8_0", "-ctv", "q8_0", "-fa", "on",
+     "--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "-md", "~/llamacpp/models/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"]}
+ ]
+}
