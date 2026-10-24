@@ -5,6 +5,7 @@
 #
 #   spark/build_engine.sh                    # engine + picture reader -> ./out-spark/engine
 #   BUILD_VISION=0 spark/build_engine.sh     # text only (faster)
+#   BUILD_DSV41=0 spark/build_engine.sh      # without the DeepSeek-V4.1 engine (strata-dsv41)
 #   ARCHS="121" OUT=/tmp/eng JOBS=8 spark/build_engine.sh
 #
 # The result is the folder setup.py keeps its ready-made engine in: copy it to Strata/engine on the Spark and run
@@ -42,8 +43,9 @@ last=$(echo "$archs" | tr ';,' '  ' | awk '{print $NF}')
 cd "$repo"
 "$cmake" -G Ninja -S . -B "$build" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
     -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_MMQ_KQUANTS=ON \
+    -DSTRATA_BUILD_DSV41="$([ "${BUILD_DSV41:-1}" = 1 ] && echo ON || echo OFF)" \
     "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual" -DSTRATA_GGML_DIR="$llama"
-"$cmake" --build "$build" --target strata strata_kq -j "$jobs"
+"$cmake" --build "$build" --target strata strata_kq $([ "${BUILD_DSV41:-1}" = 1 ] && echo strata-dsv41) -j "$jobs"
 
 if [ "${BUILD_VISION:-1}" = 1 ]; then
   "$cmake" -G Ninja -S tools/vision -B "$vision_dir" -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$llama" \
@@ -57,6 +59,8 @@ rm -rf "$out"
 mkdir -p "$out"
 cp "$build/strata" "$out/"
 [ -f "$build/libstrata_kq.so" ] && cp "$build/libstrata_kq.so" "$out/"
+# DeepSeek-V4.1's engine beside it: setup.py takes engine/strata-dsv41 (dsv41_exe) on a computer the DeepSeek packages do not cover
+[ "${BUILD_DSV41:-1}" = 1 ] && cp "$build/strata-dsv41" "$out/"
 vision_json=""
 if [ "${BUILD_VISION:-1}" = 1 ] && [ -f "$vision_dir/bin/strata-vision" ]; then
   cp "$vision_dir/bin/strata-vision" "$out/"

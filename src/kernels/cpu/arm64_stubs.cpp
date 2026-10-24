@@ -102,6 +102,9 @@ void iq256_rows_v(int, int, const uint8_t*, size_t, int, const void* const*, int
     x86_only("iq256_rows_v");
 }
 void q8k_quant_avx2(const float*, void*, int64_t) { x86_only("q8k_quant_avx2"); }
+// the plain (non-gate/up) rows the DeepSeek engine's CPU lane asks for (src/dsv41/ds4_gg_cpu.cpp: ggml-cpu's dot without AVX2)
+bool iq256x_supported(int) noexcept { return false; }
+void iq256x_rows(int, const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int) { x86_only("iq256x_rows"); }
 void iq4nl256_down_rows(const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int) {
     x86_only("iq4nl256_down_rows");
 }
@@ -114,6 +117,8 @@ void iq512_gu_rows(int, const uint8_t*, size_t, size_t, int, const void* const*,
 void iq512_rows(int, const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int) {
     x86_only("iq512_rows");
 }
+bool iq512x_supported(int) noexcept { return false; }
+void iq512x_rows(int, const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int) { x86_only("iq512x_rows"); }
 
 // ---- kq_avx1.cpp / kq_avx2.cpp: the K-quant rows and the router lookahead's bf16 dot
 void kq256_gu_rows(int, const uint8_t*, size_t, size_t, int, const void* const*, int, float* const*, int, int) {
@@ -144,12 +149,12 @@ void nvfp4_512_rows(const uint8_t*, size_t, int, const void* const*, int, float*
     x86_only("nvfp4_512_rows");
 }
 
-// ---- tq_avx2.cpp / tq_avx512.cpp: the trellis rows (tq_cpu.cpp takes its scalar rows off x86)
+// ---- tq_avx2.cpp / tq_avx512.cpp: the trellis rows (tq_cpu.cpp and the DeepSeek engine take the scalar rows off x86)
 namespace tq_detail {
-void tq_rows_avx2(int, const uint8_t*, size_t, int, const TqAct* const*, int, float* const*, int, int) {
+void tq_rows_avx2(int, const int16_t*, const uint8_t*, size_t, int, const TqAct* const*, int, float* const*, int, int) {
     x86_only("tq_rows_avx2");
 }
-void tq_rows_avx512(int, const uint8_t*, size_t, int, const TqAct* const*, int, float* const*, int, int) {
+void tq_rows_avx512(int, const int16_t*, const uint8_t*, size_t, int, const TqAct* const*, int, float* const*, int, int) {
     x86_only("tq_rows_avx512");
 }
 }  // namespace tq_detail
