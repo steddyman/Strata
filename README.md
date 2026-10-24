@@ -270,6 +270,12 @@ and `strata connect opencode --write` writes them for you (with a backup).
 Mac (about 7 minutes), asks the same questions, downloads the model and starts it. Next time, `./setup.sh` starts it
 right away. Which size fits your Mac: [docs/MAC.md](docs/MAC.md).
 
+**NVIDIA DGX Spark (GB10, arm64), experimental:** the app, the Terminal and the ready-made engines are x86_64 only, so on
+a Spark you build the engine (on the Spark in about 1.5 minutes, or on an Apple Silicon Mac with `spark/build_on_mac.sh`)
+and run `./setup.sh`. Setup sees the GB10's unified memory and keeps every expert in the GPU's share of it. Measured on one
+Spark with NVFP4: 44 tok/s output, about 1,300-1,500 tok/s reading 4K-16K prompts. Steps and numbers:
+[docs/DGX_SPARK.md](docs/DGX_SPARK.md).
+
 The installer finds your card and sets up the right engine. It asks which model and size, how much context (how much text
 the model keeps in mind) and whether it should read pictures. Press Enter for the recommended answer. Then it downloads the
 model (about 70 GB) and starts it. If the download stops, run it again and it continues. Your browser opens the Strata

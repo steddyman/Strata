@@ -98,6 +98,11 @@ One DGX Spark (GB10, 128 GB, DGX OS, driver 580.178.04), engine 0.1.48.1 built o
 Setup's tuning then chose `--pool-workers 4` (43.9 tok/s in its own measurement). Its PCIe-share step measures nothing
 here (44.0-44.2 tok/s at every value): every expert is already on the GPU.
 
+Prompt reading is about 55% of an RTX card that holds the whole model (docs/NVFP4.md: 2,503 tok/s, 4-8K prompts): the GB10
+has 48 SMs and 273 GB/s of LPDDR5X. The Blackwell FP4 prompt mode (`STRATA_PREFILL_NVFP4=w4a4`) runs on it (`sm_121a`)
+but is not faster here: 870-1,159 tok/s against 1,012-1,113 with the default `w4a8` on three ~10K-token prompts of
+random words, so the default stays.
+
 Answers and pictures were checked by hand: a factual question with a code answer, and a picture of a red square and a blue
 circle, described correctly.
 
