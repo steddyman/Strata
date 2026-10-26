@@ -73,6 +73,7 @@ def main():
         return
     if os.path.exists(c["log"]):
         os.remove(c["log"])
+    rc = 0
     srv = subprocess.Popen([f"{STRATA}/.venv/bin/python", f"{STRATA}/serve/server.py", "--engine", "strata", "--config", cfg,
                             "--port", str(a.port)], cwd=STRATA, stdout=open(f"/tmp/exp-{a.name}.server.log", "w"),
                            stderr=subprocess.STDOUT, start_new_session=True)
@@ -80,7 +81,7 @@ def main():
         if not ready(a.port):
             print("NOT READY; server log tail:")
             print(open(f"/tmp/exp-{a.name}.server.log").read()[-2000:])
-            return
+            return 2
         sys.stdout.flush()
         if a.bench == "agents":                                       # 8 concurrent 6-turn code-review sessions (agents_bench.py)
             files = open(f"{DEV}/agent_files.txt").read().split()
@@ -98,6 +99,9 @@ def main():
             r = subprocess.run([sys.executable, f"{DEV}/decode_bench.py", "--url", f"http://127.0.0.1:{a.port}/v1",
                                 "--long", f"{DEV}/prompt-4k.txt", "--rounds", str(a.rounds)], check=False, capture_output=True, text=True)
         print(r.stdout, end="")
+        if r.returncode != 0:                                          # a failed bench: its error and exit status, not silence
+            sys.stderr.write(r.stderr)
+            rc = r.returncode
         with open(f"{DEV}/results.txt", "a") as f:                    # one line per experiment, kept for comparison
             res = [l for l in r.stdout.splitlines() if l.startswith("RESULT ")]
             f.write(f"{a.name}\t{' '.join(a.env)}\t{' '.join(a.arg)}\t{res[-1][7:] if res else 'NO RESULT'}\n")
@@ -111,7 +115,8 @@ def main():
     for line in open(c["log"], errors="replace"):
         if any(k in line for k in keep):
             print("LOG " + line.rstrip()[:400])
+    return rc
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

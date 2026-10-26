@@ -1,0 +1,62 @@
+loading the vision encoder ...
+loading the model (the first start takes a minute or two) ...
+[strata] starting the engine: reading the model's weights ...
+[strata] mapping the experts from the model files (about 6 GB, --mmap-experts): they are not loaded into RAM - the OS file cache reads them as the GPU's expert cache fills and as requests need them.
+         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.
+         Please wait and don't close this window; the server says when it is ready.
+[strata] filling the GPU's expert cache (24576 experts, 63.29 GiB of VRAM) ...
+[strata] still starting (36 s) - please wait ...
+[strata] still starting (56 s) - please wait ...
+[strata] still starting (76 s) - please wait ...
+[strata] almost ready ...
+ready: http://127.0.0.1:8180/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, context 131072 tokens, images on)
+       open http://127.0.0.1:8180/ in a browser to chat; close this window to stop the model
+[strata] done: 10 tokens in 1 s (38.2 tok/s) (stop, cancel=False)
+[strata] answering: 9 of max 512 tokens, 36.0 tok/s, 1 s
+[strata] answering: 50 of max 512 tokens, 41.2 tok/s, 2 s
+[strata] answering: 106 of max 512 tokens, 47.2 tok/s, 3 s
+[strata] answering: 165 of max 512 tokens, 50.2 tok/s, 4 s
+[strata] answering: 217 of max 512 tokens, 50.4 tok/s, 5 s
+[strata] answering: 274 of max 512 tokens, 51.6 tok/s, 6 s
+[strata] answering: 334 of max 512 tokens, 52.8 tok/s, 7 s
+[strata] answering: 396 of max 512 tokens, 53.7 tok/s, 8 s
+[strata] answering: 457 of max 512 tokens, 54.3 tok/s, 9 s
+[strata] done: 512 tokens in 10 s (55.4 tok/s) (length, cancel=False)
+[strata] reading the prompt: 90 of 91 tokens, 2 s so far
+[strata] answering: 67 of max 512 tokens, 68.9 tok/s, 3 s
+[strata] answering: 142 of max 512 tokens, 70.4 tok/s, 4 s
+[strata] answering: 212 of max 512 tokens, 70.1 tok/s, 5 s
+[strata] answering: 281 of max 512 tokens, 69.4 tok/s, 6 s
+[strata] answering: 354 of max 512 tokens, 69.5 tok/s, 7 s
+[strata] answering: 422 of max 512 tokens, 69.2 tok/s, 8 s
+[strata] answering: 488 of max 512 tokens, 68.5 tok/s, 9 s
+[strata] done: 511 tokens in 9 s (68.8 tok/s) (stop, cancel=False)
+[strata] answering: 19 of max 512 tokens, 57.5 tok/s, 1 s
+[strata] answering: 84 of max 512 tokens, 61.4 tok/s, 2 s
+[strata] answering: 152 of max 512 tokens, 63.6 tok/s, 3 s
+[strata] answering: 216 of max 512 tokens, 63.4 tok/s, 4 s
+[strata] answering: 270 of max 512 tokens, 60.6 tok/s, 5 s
+[strata] answering: 342 of max 512 tokens, 62.0 tok/s, 6 s
+[strata] answering: 410 of max 512 tokens, 62.9 tok/s, 7 s
+[strata] answering: 480 of max 512 tokens, 63.6 tok/s, 8 s
+[strata] done: 512 tokens in 9 s (63.9 tok/s) (length, cancel=False)
+[strata] answering: 26 of max 512 tokens, 63.6 tok/s, 1 s
+[strata] answering: 95 of max 512 tokens, 65.6 tok/s, 2 s
+[strata] answering: 175 of max 512 tokens, 70.4 tok/s, 3 s
+[strata] answering: 245 of max 512 tokens, 69.8 tok/s, 4 s
+[strata] answering: 316 of max 512 tokens, 69.7 tok/s, 5 s
+[strata] answering: 386 of max 512 tokens, 69.5 tok/s, 6 s
+[strata] answering: 463 of max 512 tokens, 70.5 tok/s, 7 s
+[strata] done: 512 tokens in 8 s (70.9 tok/s) (length, cancel=False)
+[strata] answering: 18 of max 512 tokens, 49.4 tok/s, 1 s
+[strata] answering: 84 of max 512 tokens, 60.3 tok/s, 2 s
+[strata] answering: 145 of max 512 tokens, 60.5 tok/s, 3 s
+[strata] answering: 218 of max 512 tokens, 63.7 tok/s, 4 s
+[strata] answering: 280 of max 512 tokens, 63.1 tok/s, 5 s
+[strata] answering: 345 of max 512 tokens, 63.2 tok/s, 6 s
+[strata] answering: 416 of max 512 tokens, 64.3 tok/s, 7 s
+[strata] answering: 491 of max 512 tokens, 65.4 tok/s, 8 s
+[strata] done: 512 tokens in 8 s (65.2 tok/s) (length, cancel=False)
+
+[strata] stopping (Ctrl+C again to end the engine at once) ...
+[strata] stopped
