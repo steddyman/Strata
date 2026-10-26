@@ -1,0 +1,61 @@
+model	arm	round	task	prompt_tokens	generated	decode_ms	decode_tok_s	drafts_accepted	drafts_offered
+deepseek-1.75bpw	after	1	warmup	17	12	785	15.29		
+deepseek-1.75bpw	after	1	lru	45	512	13437	38.10		
+deepseek-1.75bpw	after	1	dataclass	75	512	12380	41.36		
+deepseek-1.75bpw	after	1	tests	77	512	15869	32.26		
+deepseek-1.75bpw	after	1	api	58	512	11968	42.78		
+deepseek-1.75bpw	after	1	ts	66	512	13021	39.32		
+deepseek-1.75bpw	after	2	warmup	17	12	826	14.54		
+deepseek-1.75bpw	after	2	lru	45	512	14448	35.44		
+deepseek-1.75bpw	after	2	dataclass	75	512	15409	33.23		
+deepseek-1.75bpw	after	2	tests	77	512	14614	35.03		
+deepseek-1.75bpw	after	2	api	58	512	12010	42.63		
+deepseek-1.75bpw	after	2	ts	67	512	13350	38.35		
+deepseek-1.75bpw	before	1	warmup	16	12	772	15.55		
+deepseek-1.75bpw	before	1	lru	45	512	16262	31.48		
+deepseek-1.75bpw	before	1	dataclass	75	512	12956	39.52		
+deepseek-1.75bpw	before	1	tests	76	512	16021	31.96		
+deepseek-1.75bpw	before	1	api	58	512	12214	41.92		
+deepseek-1.75bpw	before	1	ts	67	512	13854	36.96		
+deepseek-1.75bpw	before	2	warmup	17	12	802	14.97		
+deepseek-1.75bpw	before	2	lru	44	512	15044	34.03		
+deepseek-1.75bpw	before	2	dataclass	75	512	15209	33.67		
+deepseek-1.75bpw	before	2	tests	77	512	16398	31.22		
+deepseek-1.75bpw	before	2	api	57	512	11943	42.87		
+deepseek-1.75bpw	before	2	ts	66	512	13539	37.82		
+qwen-nvfp4	after+en-vocab	1	warmup	35	10	251	39.8	7	9
+qwen-nvfp4	after+en-vocab	1	lru	62	512	9416	54.4	323	459
+qwen-nvfp4	after+en-vocab	1	dataclass	90	511	7541	67.8	370	410
+qwen-nvfp4	after+en-vocab	1	tests	97	512	7987	64.1	355	428
+qwen-nvfp4	after+en-vocab	1	api	76	512	7506	68.2	366	408
+qwen-nvfp4	after+en-vocab	1	ts	84	512	8125	63.0	357	440
+qwen-nvfp4	after+en-vocab	2	warmup	35	10	245	40.8	7	7
+qwen-nvfp4	after+en-vocab	2	lru	62	512	9315	55.0	326	457
+qwen-nvfp4	after+en-vocab	2	dataclass	91	511	7587	67.4	369	413
+qwen-nvfp4	after+en-vocab	2	tests	97	512	8103	63.2	354	424
+qwen-nvfp4	after+en-vocab	2	api	76	512	7634	67.1	366	402
+qwen-nvfp4	after+en-vocab	2	ts	84	512	7880	65.0	361	419
+qwen-nvfp4	after	1	warmup	34	10	260	38.5	7	9
+qwen-nvfp4	after	1	lru	62	512	9876	51.8	320	473
+qwen-nvfp4	after	1	dataclass	90	511	7821	65.3	369	416
+qwen-nvfp4	after	1	tests	95	512	8153	62.8	357	422
+qwen-nvfp4	after	1	api	76	512	7759	66.0	365	400
+qwen-nvfp4	after	1	ts	84	512	8059	63.5	362	420
+qwen-nvfp4	after	2	warmup	35	10	262	38.2	7	9
+qwen-nvfp4	after	2	lru	62	512	9236	55.4	326	473
+qwen-nvfp4	after	2	dataclass	91	511	7426	68.8	370	408
+qwen-nvfp4	after	2	tests	97	512	8016	63.9	353	417
+qwen-nvfp4	after	2	api	76	512	7219	70.9	369	401
+qwen-nvfp4	after	2	ts	84	512	7856	65.2	357	428
+qwen-nvfp4	before	1	warmup	34	10	297	33.6	7	9
+qwen-nvfp4	before	1	lru	61	512	10834	47.3	328	471
+qwen-nvfp4	before	1	dataclass	91	511	8046	63.5	371	403
+qwen-nvfp4	before	1	tests	97	512	8545	59.9	358	431
+qwen-nvfp4	before	1	api	76	512	8800	58.2	364	422
+qwen-nvfp4	before	1	ts	84	512	8605	59.5	360	428
+qwen-nvfp4	before	2	warmup	35	10	250	40.0	7	9
+qwen-nvfp4	before	2	lru	62	512	9980	51.3	330	469
+qwen-nvfp4	before	2	dataclass	90	511	8140	62.8	371	410
+qwen-nvfp4	before	2	tests	97	512	9075	56.4	357	429
+qwen-nvfp4	before	2	api	76	512	8330	61.5	365	417
+qwen-nvfp4	before	2	ts	84	512	8659	59.1	361	435
