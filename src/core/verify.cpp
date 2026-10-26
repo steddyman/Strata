@@ -1267,7 +1267,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             static const bool ple_batch = [] {
                 const char* e = std::getenv("STRATA_PLE_BATCH");
                 if (e != nullptr) return e[0] == '1';
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(STRATA_GPU_METAL)
                 return false;
 #else
                 int dev = 0;

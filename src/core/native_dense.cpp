@@ -76,6 +76,8 @@ bool hc_q8_env() {
         if (g12) std::fprintf(stderr, "strata: gfx12 (RDNA4): the hyper-connection projections are read as Q8_0 (quantized at load, "
                                       "decode faster, answers differ slightly); STRATA_HC_Q8=0 keeps the bf16 read\n");
         return g12;
+#elif defined(STRATA_GPU_METAL)
+        return false;
 #else
         // DGX Spark (GB10: sm_121, integrated, unified LPDDR5X): on by default.  The verify window is bandwidth-bound and
         // the bf16 projections are 1.2 GiB of each window's reads: decode +7% (56.9 vs 53.2 tok/s, 3 alternating pairs);

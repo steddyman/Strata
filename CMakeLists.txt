@@ -52,7 +52,7 @@ endif()
 # host loops _mm_pause / _mm_sfence and a <cpuid.h> whose every leaf reads zero; the AVX / AVX-512 kernel files are
 # left out and src/kernels/cpu/arm64_stubs.cpp stands in for them.  A native pack's CPU experts run on ggml-cpu's own
 # (NEON) rows; on a Spark every expert normally sits in the GPU's share of the unified memory anyway.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$" AND NOT APPLE)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(STRATA_ARM64 ON)
   if(STRATA_ISA_FLOOR)
     message(FATAL_ERROR "STRATA_ISA_FLOOR is an x86 option; leave it empty on arm64")
@@ -2187,6 +2187,9 @@ if(STRATA_NATIVE_EXPERTS)
     add_executable(q8_gemv_bench src/kernels/q8_gemv_bench.cpp)
     target_include_directories(q8_gemv_bench PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(q8_gemv_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_executable(q5k_gemv_bench src/kernels/q5k_gemv_bench.cpp)
+    target_include_directories(q5k_gemv_bench PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(q5k_gemv_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     if(STRATA_ENABLE_CUDA)
       # EXPDEC (docs/EXPERTDEC.md): the grouped experts' default kernels against STRATA_EXPDEC=1 at T = 1..4, bit for bit
       # and in microseconds, on synthetic blobs read cold from DRAM

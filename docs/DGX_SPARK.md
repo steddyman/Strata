@@ -172,6 +172,25 @@ tokens, 3 alternating rounds, 26 October 2026.
 - *FP4×FP4 prompt GEMMs* (`STRATA_PREFILL_NVFP4=w4a4`): 1141/1318/1298 against 1151/1341/1350 tokens/s at 16K/32K/64K.
 - *A deeper speculation window* (`--spec 6`) and other `--spec-min-p` values.
 
+## Spark speed settings (DeepSeek-V4.1-Flash)
+
+Setup writes `--dspark-conf 0.4` on a Spark, against 0.65 elsewhere. That is the draft confidence below which the DSpark
+drafter's guesses are not checked. With the 1.75 bpw set the Spark answers **28.1 instead of 25.3 tokens/s (+11%)**; 0.5
+gave 26.9 and 0.3 gave 27.4 (2 rounds of 3 prompts each, 26 October 2026). The 2.00 bpw set gains about 2%: more of it is
+read from the SSD. Greedy answers are the same, because the full model checks every draft.
+
+Where DeepSeek's time goes on a GB10 (Nsight Systems and the engine's `DS4_PROF`):
+
+- The GPU is busy 92-94% of the time.
+- Its dense Q5_K matrix products (5.9 GB per step) are about 40% of that, at 160-180 GB/s. Strata's own K-quant GEMV is
+  only faster on some of these shapes (`q5k_gemv_bench`).
+- The routed experts read at about 175 GB/s.
+- About 10% is spent waiting on the CPU lane and between kernels. The engine reads each layer's routing back to the host,
+  so it cannot use CUDA graphs.
+
+Tried and not kept: less memory left to the OS (`DS4_UMA_HEADROOM_GIB` 3 or 2 instead of 6). It puts 650 more experts
+on the GPU but measured within noise.
+
 ## How these were measured
 
 One DGX Spark (GB10, 128 GB, DGX OS, kernel 7.0.0-1019-nvidia, driver 580.178.04), engines built on the Spark with CUDA

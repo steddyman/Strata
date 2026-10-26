@@ -927,6 +927,24 @@ int serve(strata::ds4::Model& m, const std::string& eos_list, bool spec, float c
                      s.experts ? 100.0 * (double) s.cpu_experts / (double) s.experts : 0.0);
         if (d_off > 0) std::fprintf(stderr, "maya ds4 serve: drafts %lld of %lld kept; %s\n", d_acc, d_off,
                                     per_position(s_dec, s).c_str());
+        if (s.prof_tokens > s_dec.prof_tokens) {   // DS4_PROF: this answer's costs a fed token and the GPU's by stage
+            const double fed = (double) std::max<int64_t>(1, s.tokens - s_dec.tokens);
+            std::fprintf(stderr, "maya ds4 serve: per fed token: CPU-lane experts %.3f, RAM-store experts %.3f, swaps %.3f, "
+                                 "Engram %.3f ms, storage read %.2f MB (%lld fed)\n",
+                         (double) (s.cpu_experts - s_dec.cpu_experts) / fed, (double) (s.ram_experts - s_dec.ram_experts) / fed,
+                         (double) (s.swaps - s_dec.swaps) / fed, (s.engram_ms - s_dec.engram_ms) / fed,
+                         (double) (io_read_bytes() - io_dec) / fed / 1e6, (long long) fed);
+            {
+                const double pt = (double) (s.prof_tokens - s_dec.prof_tokens);
+                double sum = 0;
+                for (int i = 0; i < 6; ++i) sum += (s.prof_ms[i] - s_dec.prof_ms[i]) / pt;
+                std::fprintf(stderr, "maya ds4 serve: GPU per token (DS4_PROF): %.2f ms - between layers %.2f, attention %.2f, "
+                                     "routing + shared expert %.2f, experts gate/up %.2f, waiting for the CPU lane %.2f, down + "
+                                     "post %.2f\n", sum, (s.prof_ms[0] - s_dec.prof_ms[0]) / pt, (s.prof_ms[1] - s_dec.prof_ms[1]) / pt,
+                             (s.prof_ms[2] - s_dec.prof_ms[2]) / pt, (s.prof_ms[3] - s_dec.prof_ms[3]) / pt,
+                             (s.prof_ms[4] - s_dec.prof_ms[4]) / pt, (s.prof_ms[5] - s_dec.prof_ms[5]) / pt);
+            }
+        }
         m.save_profile();
     }
     // the engine ends (QUIT or the end of its input): the conversation in the model is set aside, and every one in

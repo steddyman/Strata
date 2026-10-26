@@ -3423,7 +3423,7 @@ int main(int argc, char** argv) {
     strata::metal_engine::set_model_shard(o.native_preset.c_str());   // the decode window reads the model GGUF itself
     o.mmap_experts = true;   // ... experts included: no resident copy of them (the GGUF shards in place)
     if (false) {
-#elif defined(__aarch64__)   // arm64 Linux (DGX Spark): no x86 kernel in this build (arm64_stubs.cpp); a native pack's
+#elif defined(__aarch64__) && defined(__linux__)   // arm64 Linux (DGX Spark): no x86 kernel in this build (arm64_stubs.cpp); a native pack's
     if (false) {             // CPU experts run on ggml-cpu (NEON), and the canonical Q2_0 pack is refused below
 #else
     if (!strata::kernels::cpu::cpu_avx2_ok() && isa_floor[0] == '\0') {

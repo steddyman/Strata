@@ -8153,8 +8153,11 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
     # its own choice for several), so no --prefill-chunk is written.  --dspark-conf 0.65: the
     # drafts' confidence floor (H100 replay, DSPARK-DEFAULTS.md: within 0.01-0.02 of the per-class best, never below 0.3).  The engine has
     # no flag for the draft block (3 in the same table): it reads the block size from the pack, so only the floor is written.
+    # A DGX Spark (arm64, unified memory) drafts more at 0.4: the 1.75 bpw set 28.1 against 25.3 tokens/s at 0.65 (2 rounds of 3
+    # prompts each, 2026-10-26; 0.5 26.9, 0.3 27.4; the 2.00 bpw set, more of it read from the SSD, +2%). Greedy answers are the same.
+    conf = "0.4" if ARM64_LINUX and (gpu or {}).get("uma") else "0.65"
     args = ["--pack", str(pack), "--max-context", str(ctx), "--eos", "1", "--dspark", "auto",
-            *(["--dspark-conf", "0.65"] if md.get("recipe") == "ista" else []), *plan["args"]]
+            *(["--dspark-conf", conf] if md.get("recipe") == "ista" else []), *plan["args"]]
     cfg = {"exe": str(exe), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": fam["name"], "arch": fam["arch"], "log": str(home() / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port, "engine_ready_s": 3600}      # 300+ GB read from the files: a slow disk needs its time
@@ -8830,7 +8833,7 @@ def main() -> int:
         if multi:
             ok("GPUs: " + " + ".join(gpu_name(x) for x in chosen) + " together (the model's layers are split across them)")
         ok(f"GPU: {gpu['name']}, " + (f"unified memory ({gpu['vram_gb']:.0f} GB usable by the GPU, docs/DGX_SPARK.md)"
-                                      if gpu.get("uma") else f"{gpu['vram_gb']:.1f} GB VRAM")
+                                      if gpu.get("uma") and ARM64_LINUX else f"{gpu['vram_gb']:.1f} GB VRAM")
            + f", compute capability {cc(gpu)}, driver {gpu['driver']}")
         cuda_tk, why = cuda_choice(gpu["archs"], a.cuda)   # one engine per model: its oldest card decides
         if why:
@@ -8868,7 +8871,7 @@ def main() -> int:
         warn(page_file_advice(pf, page_file_setting()))
     ok(f"CPU: {cpu} ({'arm64' if ARM64_LINUX else 'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     # (a unified-memory GPU - a DGX Spark's GB10 - is on the CPU's own link, not PCIe: nvidia-smi's "1.0 x1" there means nothing)
-    link = None if hip or gpu.get("uma") else pcie_link(int(gpu.get("index", 0)))
+    link = None if hip or (ARM64_LINUX and gpu.get("uma")) else pcie_link(int(gpu.get("index", 0)))
     if link is not None:
         line, problem = pcie_lines(link)
         ok(line)
