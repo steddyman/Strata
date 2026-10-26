@@ -12,8 +12,8 @@ the engine (about 1.5 minutes on the Spark) and start Strata with `./setup.sh`.
 | --- | --- | --- | --- | --- | --- |
 | **Qwen3.8-Flash-Next NVFP4** | **46.9 tokens/s** | 1,312 tokens/s (4K) · 1,453 tokens/s (16K) | 128K, reads pictures | 128 GB | The best Qwen: closest to the full model |
 | **Qwen3.8-Flash-Next IQ3_XXS** | **52.7 tokens/s** | 1,258 tokens/s (4K) · 1,496 tokens/s (32K) | 64K as measured | 76 GB | 3-bit: smaller and faster, lower quality |
-| **DeepSeek-V4.1-Flash 1.75-bit** | **37 tokens/s** once warm (24 just after starting) | 195-290 tokens/s (3.7K) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
-| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 175 tokens/s (3.7K) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
+| **DeepSeek-V4.1-Flash 1.75-bit** | **37 tokens/s** once warm (24 just after starting) | 286 tokens/s (3.7K, warm) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
+| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 252 tokens/s (3.7K, warm) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
 
 On the same model file (IQ3_XXS) and the same Spark, Strata answers **1.4x faster** and reads a 32K prompt **1.7x
 faster** than llama.cpp v0.6.0 ([the comparison](../bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md)).
@@ -23,7 +23,8 @@ faster** than llama.cpp v0.6.0 ([the comparison](../bench/results/2026-10-24-dgx
 
 "Answers" is how fast the reply is written. "Reading your prompt" is how fast Strata reads what you send before it
 starts to answer. All numbers are medians from one DGX Spark, engine 0.1.51 with the Spark speed settings, 26 October
-2026 (the "just after starting" figures: 24 October, memory emptied first); the details are in
+2026 (from 24 October: the "just after starting" figures, with memory emptied first, and the 128K test, 403
+tokens/s at 31K); the details are in
 [How these were measured](#how-these-were-measured).
 
 ## Which model should I pick?
