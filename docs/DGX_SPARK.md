@@ -277,7 +277,8 @@ the page cache was full (10-12 tokens/s), and was killed by Linux's out-of-memor
 ### Coding tasks
 
 26 October 2026, engine 0.1.51, the user's configs. Five coding prompts, each up to 512 tokens, thinking off, temperature 0,
-prompt cache off, 2 rounds with the arms alternating; server-reported tokens/s, averages of the 2 rounds. "Before" is the same
+prompt cache off, 2 rounds with the arms alternating; server-reported tokens/s, averages of the 2 rounds. Every run, request and
+log: [bench/results/2026-10-26-dgx-spark-coding](../bench/results/2026-10-26-dgx-spark-coding/README.md). "Before" is the same
 engine with the Spark settings switched off (Qwen: `STRATA_HC_Q8=0 STRATA_PLE_BATCH=0`, no `--mtp-q4`; DeepSeek:
 `--dspark-conf 0.65`).
 
