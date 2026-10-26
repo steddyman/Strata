@@ -274,6 +274,25 @@ The 1.75-bit set at 128K context (`--max-context 131072`): one 30,965-token prom
 Before the arm64 build's change to DeepSeek's memory placement, the same engine put only 42 GB of experts on the GPU when
 the page cache was full (10-12 tokens/s), and was killed by Linux's out-of-memory killer when memory was empty.
 
+### Coding tasks
+
+26 October 2026, engine 0.1.51, the user's configs. Five coding prompts, each up to 512 tokens, thinking off, temperature 0,
+prompt cache off, 2 rounds with the arms alternating; server-reported tokens/s, averages of the 2 rounds. "Before" is the same
+engine with the Spark settings switched off (Qwen: `STRATA_HC_Q8=0 STRATA_PLE_BATCH=0`, no `--mtp-q4`; DeepSeek:
+`--dspark-conf 0.65`).
+
+| Task | Qwen NVFP4 before | after | DeepSeek 1.75-bit before | after |
+| --- | ---: | ---: | ---: | ---: |
+| An LRU cache module with a TTL per entry | 49.3 | 53.6 | 32.8 | 36.8 |
+| A 12-field dataclass with `to_dict` / `from_dict` | 63.1 | 67.0 | 36.6 | 37.3 |
+| A pytest suite for a duration parser | 58.1 | 63.3 | 31.6 | 33.6 |
+| A FastAPI CRUD app with Pydantic models | 59.9 | 68.5 | 42.4 | 42.7 |
+| A JavaScript-to-TypeScript conversion | 59.3 | 64.3 | 37.4 | 38.8 |
+| **All five** (tokens / decode time) | **57.5** | **62.9 (+9%)** | **35.7** | **37.5 (+5%)** |
+
+Qwen with `--draft-vocab en` as well: 63.1 tokens/s, the same within noise. DeepSeek's draft-confidence setting helps prose more
+than code: its code drafts were already mostly accepted at 0.65.
+
 ## What was checked, and what was not
 
 - Checked on a DGX Spark: setup, starting, tuning, `./bench.sh`, chat, pictures and tool calls with Qwen NVFP4; Qwen

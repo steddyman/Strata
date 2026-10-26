@@ -51,6 +51,14 @@ Medians measured on one DGX Spark with engine 0.1.51 on 26 October 2026 (the "ju
 128K test, 403 tokens/s at 31K, on 24 October); how each number was measured is in
 [the DGX Spark guide](docs/DGX_SPARK.md#how-these-were-measured).
 
+**Writing code**
+
+<p align="center"><img src="docs/media/dgx-spark-coding.png" width="800" alt="Faster coding on one DGX Spark: on five coding tasks, Qwen3.8-Flash-Next NVFP4 went from 57.5 to 62.9 tokens a second (+9%, up to 68.5 on a FastAPI app) and DeepSeek-V4.1-Flash 1.75-bit from 35.7 to 37.5 tokens a second (+5%) with the Spark speed settings"></p>
+
+On five everyday coding tasks (thinking off), the Spark speed settings make Qwen3.8-Flash-Next NVFP4 write code at
+**62.9 tokens/s** (57.5 before, +9%; 68.5 on a FastAPI app) and DeepSeek-V4.1-Flash 1.75-bit at **37.5 tokens/s**
+(35.7 before, +5%). [How it was measured](docs/DGX_SPARK.md#coding-tasks).
+
 **Start here: [docs/DGX_SPARK.md](docs/DGX_SPARK.md)**: which model to pick, how to build and install it, and how to
 use it from your Mac or PC.
 
