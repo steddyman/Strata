@@ -30,16 +30,16 @@
 shared by both. It runs Qwen3.8-Flash-Next (a 125-billion-parameter model) and DeepSeek-V4.1-Flash on a single Spark,
 with every Qwen expert on the GPU.
 
-<p align="center"><img src="docs/media/dgx-spark-speeds.png" width="800" alt="Strata on NVIDIA DGX Spark: Qwen3.8-Flash-Next NVFP4 at 44.7 tokens a second and 1,471 tokens a second prompt reading; DeepSeek-V4.1-Flash 1.75-bit at 33 tokens a second; 1.4 times faster output and 1.7 times faster prompt reading than llama.cpp on the same model file"></p>
+<p align="center"><img src="docs/media/dgx-spark-speeds.png" width="800" alt="Strata on NVIDIA DGX Spark: Qwen3.8-Flash-Next NVFP4 at 46.9 tokens a second and 1,453 tokens a second prompt reading; DeepSeek-V4.1-Flash 1.75-bit at 37 tokens a second; 1.4 times faster output and 1.7 times faster prompt reading than llama.cpp on the same model file"></p>
 
 **Speed on one DGX Spark**
 
 | Model | Answers | Reading your prompt | Context | Download | Quality |
 | --- | --- | --- | --- | --- | --- |
-| **Qwen3.8-Flash-Next NVFP4** | **44.7 tokens/s** | 1,330 tokens/s (4K) · 1,471 tokens/s (16K) | 128K, reads pictures | 128 GB | The best Qwen: closest to the full model |
-| **Qwen3.8-Flash-Next IQ3_XXS** | **51.1 tokens/s** | 1,266 tokens/s (4K) · 1,469 tokens/s (32K) | 64K as measured | 76 GB | 3-bit: smaller and faster, lower quality |
-| **DeepSeek-V4.1-Flash 1.75-bit** | **33 tokens/s** once warm (24 just after starting) | 195-300 tokens/s (3.7K) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
-| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 175 tokens/s (3.7K) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
+| **Qwen3.8-Flash-Next NVFP4** | **46.9 tokens/s** | 1,312 tokens/s (4K) · 1,453 tokens/s (16K) | 128K, reads pictures | 128 GB | The best Qwen: closest to the full model |
+| **Qwen3.8-Flash-Next IQ3_XXS** | **52.7 tokens/s** | 1,258 tokens/s (4K) · 1,496 tokens/s (32K) | 64K as measured | 76 GB | 3-bit: smaller and faster, lower quality |
+| **DeepSeek-V4.1-Flash 1.75-bit** | **37 tokens/s** once warm (24 just after starting) | 286 tokens/s (3.7K, warm) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
+| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 252 tokens/s (3.7K, warm) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
 
 On the same model file and the same Spark, Strata answers **1.4x faster** and reads long prompts **1.7x faster** than
 llama.cpp ([the comparison](bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md)).
@@ -47,7 +47,8 @@ llama.cpp ([the comparison](bench/results/2026-10-24-dgx-spark-vs-llamacpp/READM
 \* Setup gives DeepSeek an 8K context. Coding agents need more: the guide shows how to raise it to 128K, which was
 tested with the 1.75-bit set (a 31,000-token prompt read correctly).
 
-Medians measured on one DGX Spark on 24 October 2026; how each number was measured is in
+Medians measured on one DGX Spark with engine 0.1.51 on 26 October 2026 (the "just after starting" figures and the
+128K test, 403 tokens/s at 31K, on 24 October); how each number was measured is in
 [the DGX Spark guide](docs/DGX_SPARK.md#how-these-were-measured).
 
 **Start here: [docs/DGX_SPARK.md](docs/DGX_SPARK.md)**: which model to pick, how to build and install it, and how to

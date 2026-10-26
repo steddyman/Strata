@@ -10,10 +10,10 @@ the engine (about 1.5 minutes on the Spark) and start Strata with `./setup.sh`.
 
 | Model | Answers | Reading your prompt | Context | Download | Quality |
 | --- | --- | --- | --- | --- | --- |
-| **Qwen3.8-Flash-Next NVFP4** | **44.7 tokens/s** | 1,330 tokens/s (4K) · 1,471 tokens/s (16K) | 128K, reads pictures | 128 GB | The best Qwen: closest to the full model |
-| **Qwen3.8-Flash-Next IQ3_XXS** | **51.1 tokens/s** | 1,266 tokens/s (4K) · 1,469 tokens/s (32K) | 64K as measured | 76 GB | 3-bit: smaller and faster, lower quality |
-| **DeepSeek-V4.1-Flash 1.75-bit** | **33 tokens/s** once warm (24 just after starting) | 195-300 tokens/s (3.7K) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
-| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 175 tokens/s (3.7K) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
+| **Qwen3.8-Flash-Next NVFP4** | **46.9 tokens/s** | 1,312 tokens/s (4K) · 1,453 tokens/s (16K) | 128K, reads pictures | 128 GB | The best Qwen: closest to the full model |
+| **Qwen3.8-Flash-Next IQ3_XXS** | **52.7 tokens/s** | 1,258 tokens/s (4K) · 1,496 tokens/s (32K) | 64K as measured | 76 GB | 3-bit: smaller and faster, lower quality |
+| **DeepSeek-V4.1-Flash 1.75-bit** | **37 tokens/s** once warm (24 just after starting) | 286 tokens/s (3.7K, warm) · 403 tokens/s (31K) | 8K by default, 128K tested* | 239 GB | Good for code and agents, weaker on plain prose |
+| **DeepSeek-V4.1-Flash 2.00-bit** | **28 tokens/s** once warm (17 just after starting) | 252 tokens/s (3.7K, warm) | 8K by default* | 257 GB | Better than 1.75-bit, slower here |
 
 On the same model file (IQ3_XXS) and the same Spark, Strata answers **1.4x faster** and reads a 32K prompt **1.7x
 faster** than llama.cpp v0.6.0 ([the comparison](../bench/results/2026-10-24-dgx-spark-vs-llamacpp/README.md)).
@@ -22,7 +22,9 @@ faster** than llama.cpp v0.6.0 ([the comparison](../bench/results/2026-10-24-dgx
 [Give DeepSeek a longer context](#give-deepseek-a-longer-context).
 
 "Answers" is how fast the reply is written. "Reading your prompt" is how fast Strata reads what you send before it
-starts to answer. All numbers are medians from one DGX Spark on 24 October 2026; the details are in
+starts to answer. All numbers are medians from one DGX Spark, engine 0.1.51 with the Spark speed settings, 26 October
+2026 (from 24 October: the "just after starting" figures, with memory emptied first, and the 128K test, 403
+tokens/s at 31K); the details are in
 [How these were measured](#how-these-were-measured).
 
 ## Which model should I pick?
@@ -210,6 +212,11 @@ replies, 3 prompts each of 4K and 16K tokens, 15 agent turns.
 | first token, 16K prompt | 11.55 s | 10.97 s | 10.96 s |
 | agent turns, replies | 43.6 tokens/s | 43.1 tokens/s | 44.6 tokens/s |
 
+On 26 October 2026, engine 0.1.51 with the Spark speed settings (8-bit hyper-connection read, `--mtp-q4 all`, batched
+PLE; the default draft vocabulary), the same suite: chat replies **46.9 tokens/s** (43.1-62.2), 4K prompt 1,312
+tokens/s, 16K prompt 1,453 tokens/s (first token 11.10 s), agent turns 46.7 tokens/s, 70% of the agent's prompt
+reused. `--draft-vocab en` adds about 4.5% to answers in English.
+
 The first two columns are engine 0.1.48.1. Setup's tuning chose `--pool-workers 4` (43.9 tokens/s in its own
 measurement); its PCIe-share step changes nothing here (44.0-44.2 tokens/s at every value), because every expert is
 already on the GPU.
@@ -232,6 +239,10 @@ temperature 0 unless noted; full results in
 | reading a 4K prompt | **1,266 tokens/s** | 952 tokens/s | 881 tokens/s |
 | reading a 32K prompt | **1,469 tokens/s** | 872 tokens/s | 778 tokens/s |
 
+Re-measured on 26 October 2026 (Strata only, engine 0.1.51, the Spark speed settings, the same 3 rounds): replies
+after a 4K prompt **52.7 tokens/s** (49.2 at temperature 0.7), after a 32K prompt 46.7 (39.1; the 32K replies ranged
+42.6-53.4 over the rounds), reading a 4K prompt 1,258 tokens/s and a 32K prompt 1,496 tokens/s.
+
 llama.cpp ran with every layer on the GPU (`-ngl 99 -b 2048 -ub 2048`, 8-bit KV, flash attention); its settings were not
 tuned for the Spark.
 
@@ -247,6 +258,11 @@ IST-DAS 1.75-bit and 2.00-bit sets, setup's configuration (8K context, DSpark dr
 | **1.75-bit**, the engine built on a Mac (`spark/build_on_mac.sh`) | 26.7 tokens/s | 193.9 tokens/s | 20.8 tokens/s |
 | **2.00-bit**, started with memory empty (106.8 GB on the GPU, 33.2 GB from the SSD) | 17.4 tokens/s (12.2-26.3) | 175.1 tokens/s | 17.5 tokens/s |
 | **2.00-bit**, started with the model files cached | 28.4 tokens/s (15.2-40.8) | 174.7 tokens/s | 17.1 tokens/s |
+
+On 26 October 2026, engine 0.1.51 with `--dspark-conf 0.4` (setup's Spark setting), the same questions on a fresh
+server whose model files were still in the page cache, then a second run: the **1.75-bit** set answered 31.8, then
+**37.0 tokens/s** (prompt 185, then 286 tokens/s; after the prompt 22.6, then 25.4), with 108.2 GB of experts on the GPU;
+the **2.00-bit** set 20.3, then 27.7 tokens/s (prompt 179, then 252 tokens/s).
 
 Replies get faster as a model warms up, because the experts it reads from the SSD stay in memory. The DSpark drafter
 accepted 80-95% of its tokens on these questions. For comparison, the DeepSeek release measured 4.7 tokens/s on an RTX
