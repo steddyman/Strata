@@ -118,6 +118,7 @@ void iq512_rows(int, const uint8_t*, size_t, int, const void* const*, int, float
     x86_only("iq512_rows");
 }
 bool iq512x_supported(int) noexcept { return false; }
+bool iq512_gather_on() noexcept { return false; }
 void iq512x_rows(int, const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int) { x86_only("iq512x_rows"); }
 
 // ---- kq_avx1.cpp / kq_avx2.cpp: the K-quant rows and the router lookahead's bf16 dot
