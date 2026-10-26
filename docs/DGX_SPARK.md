@@ -146,6 +146,32 @@ Setup warns that sizes above 64K were not tested by the DeepSeek release. On a S
 - **Not available on the Spark:** the Strata app, the `strata` Terminal and its `install.sh`, and the Docker images,
   which are x86_64 only.
 
+## Spark speed settings (Qwen3.8-Flash-Next NVFP4)
+
+Answering is limited by memory bandwidth on the Spark. Each verify window reads a few GB of weights from the one
+LPDDR5X pool for about 3 tokens, and the GPU is busy 97-98% of the time while answering (Nsight Systems). The dense
+8-bit matrices and the NVFP4 experts already read at 87-95% of the ~230 GB/s the GB10 sustains. So the gains below come
+from reading fewer bytes. Together they give **+10.5% faster answers**: 56.4 against 51.0 tokens/s, on 3 prompts of 512
+tokens, 3 alternating rounds, 26 October 2026.
+
+| Setting | On by default | What it does | Answers |
+| --- | --- | --- | --- |
+| 8-bit hyper-connection read | yes, on a GB10 (`STRATA_HC_Q8=0` turns it off) | The 1.2 GiB of bf16 hyper-connection weights read as Q8_0. About +7% | Can differ at near-tie tokens: 94.6% same top token, KL 0.030, perplexity 3.936 against 3.937 |
+| `--mtp-q4 all` | yes, written by setup | The draft layer's 4-bit copies, so drafting reads fewer bytes. About +4.5% | Same bits: the verify window decides every token |
+| Batched PLE projections | yes, on a GB10 (`STRATA_PLE_BATCH=0` turns it off) | The window's n-gram key and value rows in one pass. About +1.8% | Same bits |
+| English draft vocabulary | no: setup's draft vocabulary choice `en` | A 105 MiB draft head instead of 276 MiB. About +4.5% | Same bits. Answers in Chinese, Japanese or Korean get fewer drafts |
+
+**Tried and not kept.** All of these were measured on this Spark:
+
+- *Requantizing the dense weights* (`tools/requant_dense_gguf.py`): Q6_K was +3% at KL 0.047, Q5_K +7% at KL 0.064 and
+  Q4_K +15% at KL 0.129. Against the 8-bit dense weights, that is too much quality for the speed.
+- *Dropping low-weight routed experts per window*: under +5%, within noise.
+- *The DFlash2 block drafter*: 50 against 51.4 tokens/s for MTP, with the same tokens per window.
+- *Strix Halo's decode switch set*: each switch alone was within ±2%. Together they were slower, and QFUSE changes the
+  answers.
+- *FP4×FP4 prompt GEMMs* (`STRATA_PREFILL_NVFP4=w4a4`): 1141/1318/1298 against 1151/1341/1350 tokens/s at 16K/32K/64K.
+- *A deeper speculation window* (`--spec 6`) and other `--spec-min-p` values.
+
 ## How these were measured
 
 One DGX Spark (GB10, 128 GB, DGX OS, kernel 7.0.0-1019-nvidia, driver 580.178.04), engines built on the Spark with CUDA

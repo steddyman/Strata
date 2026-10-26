@@ -9477,6 +9477,12 @@ def main() -> int:
         args += ["--mmap-experts"]
         ok("unified memory: the experts are read from the model files in place (--mmap-experts), so the GPU's cache "
            "holds them instead of a second copy in RAM")
+        if "--mtp" in args:
+            # the draft layer is read once per drafted token, from the same memory the verify windows read: its 4-bit
+            # copies halve those bytes. The verify window decides every token, so the answers are the same bits
+            # (GB10, 2026-10-25: decode 57.7 vs 54.8 tok/s, 2 rounds of 3 prompts, identical answer hashes)
+            args += ["--mtp-q4", "all"]
+            ok("unified memory: the draft layer's 4-bit copies (--mtp-q4 all): faster drafts, the same answers")
     disk = None if is_wsl() else rotational_disk(ple)  # #605 (WSL's virtual disk says rotational)
     if disk:
         tensor = None if ready else next((t for t in GGUFFile(ple).tensors if t.name == "per_layer_token_embd.weight"), None)
