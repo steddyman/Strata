@@ -19,6 +19,8 @@ vision_dir=${BUILD_VISION_DIR:-$repo/build-vision-spark}
 jobs=${JOBS:-$(nproc)}
 py=${PYTHON:-python3}
 cmake=${CMAKE:-cmake}
+# Ninja when there is one (the release build), else Make: a stock DGX OS has cmake and make but no ninja
+gen=${GENERATOR:-$(command -v ninja >/dev/null 2>&1 && echo Ninja || echo "Unix Makefiles")}
 llama=${STRATA_GGML_DIR:-$repo/third_party/llama.cpp}
 
 case "$(uname -s)-$(uname -m)" in
@@ -41,14 +43,14 @@ fi
 real=""; for a in $(echo "$archs" | tr ';,' '  '); do real="$real;${a}-real"; done; real=${real#;}
 last=$(echo "$archs" | tr ';,' '  ' | awk '{print $NF}')
 cd "$repo"
-"$cmake" -G Ninja -S . -B "$build" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
+"$cmake" -G "$gen" -S . -B "$build" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
     -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_MMQ_KQUANTS=ON \
     -DSTRATA_BUILD_DSV41="$([ "${BUILD_DSV41:-1}" = 1 ] && echo ON || echo OFF)" \
     "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual" -DSTRATA_GGML_DIR="$llama"
 "$cmake" --build "$build" --target strata strata_kq $([ "${BUILD_DSV41:-1}" = 1 ] && echo strata-dsv41) -j "$jobs"
 
 if [ "${BUILD_VISION:-1}" = 1 ]; then
-  "$cmake" -G Ninja -S tools/vision -B "$vision_dir" -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$llama" \
+  "$cmake" -G "$gen" -S tools/vision -B "$vision_dir" -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR="$llama" \
       -DSTRATA_VISION_CUDA=ON -DSTRATA_PORTABLE=ON -DGGML_CUDA_NCCL=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16+i8mm \
       "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual"
   "$cmake" --build "$vision_dir" --target strata-vision -j "$jobs"
