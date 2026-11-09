@@ -2399,10 +2399,98 @@ __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w,
             if (lane == 0 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
         }
 }
+// ---- gfx906 Q6_K (STRATA_G906_Q6K=0: the wave kernel above).  One wavefront per row; a lane takes 64 weights of one
+// block - 16 consecutive l of one 128-value half n: ql[64n + l .. +16], ql[64n + 32 + l .. +16], qh[32n + l .. +16],
+// three 16-byte loads (gfx906 loads 16 bytes from the blocks' 2-byte alignment) - and unpacks them once for all
+// columns.  Per column it reads the four 16-value activation runs (q8_1 blocks 4n + k, values l .. l + 15) and runs
+// four v_dot4 chains.  Every column's sums are computed the same way whatever NCOLS is (multi_exact holds); the order
+// differs from the wave kernel's, so outputs match it to float rounding, not bitwise.
+typedef int g906_v4 __attribute__((ext_vector_type(4), aligned(2)));
+typedef int g906_v4a __attribute__((ext_vector_type(4), aligned(4)));
+bool g_g906_q6k = !(std::getenv("STRATA_G906_Q6K") && std::string(std::getenv("STRATA_G906_Q6K")) == "0");
+template<int NCOLS>
+__launch_bounds__(256)
+__global__ void g906_q6k_kernel(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                int n_in, int n_out, int rows_per_block) {
+    // every column's activations go to LDS once per block of rows: read per row and column from L1 instead, their
+    // scattered 16-byte runs kept gfx906's vector memory unit busy while DRAM idled
+    extern __shared__ int g906_xs[];
+    const int x_stride = n_in / Q8K;
+    {
+        const int words = NCOLS * x_stride * int(sizeof(Q81Block) / 4);
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xs[i] = src[i];
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xs);
+    const int lane = int(threadIdx.x) & 63;
+    const int bpr = n_in / 256;
+    const int row_end = min(n_out, int(blockIdx.x) * rows_per_block + rows_per_block);
+    for (int row = int(blockIdx.x) * rows_per_block + (int(threadIdx.x) >> 6); row < row_end; row += 4) {
+        float tmp[NCOLS] = {};
+        for (int t = lane; t < 4 * bpr; t += 64) {
+            const int kb = t >> 2, n = (t >> 1) & 1, l0 = (t & 1) * 16;
+            const Q6KBlock* b = w + std::size_t(row) * bpr + kb;
+            const g906_v4 qa = *reinterpret_cast<const g906_v4*>(b->ql + 64 * n + l0);
+            const g906_v4 qb = *reinterpret_cast<const g906_v4*>(b->ql + 64 * n + 32 + l0);
+            const g906_v4 qh = *reinterpret_cast<const g906_v4*>(b->qh + 32 * n + l0);
+            int sc[4];
+#pragma unroll
+            for (int k = 0; k < 4; ++k) sc[k] = b->scales[8 * n + 2 * k + (t & 1)];
+            const float d = __half2float(b->d);
+            int vi[4][4];   // [k][dword]: the 16 values of run k, as signed bytes q - 32
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int a = qa[i], c = qb[i], h = qh[i];
+                const int v0 = (a & 0x0f0f0f0f) | ((h << 4) & 0x30303030);
+                const int v1 = (c & 0x0f0f0f0f) | ((h << 2) & 0x30303030);
+                const int v2 = ((a >> 4) & 0x0f0f0f0f) | (h & 0x30303030);
+                const int v3 = ((c >> 4) & 0x0f0f0f0f) | ((h >> 2) & 0x30303030);
+                // q - 32 per byte without borrows: q < 64, so (q | 0x80) - 0x20 stays in a byte; ^ 0x80 makes it signed
+                vi[0][i] = ((v0 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+                vi[1][i] = ((v1 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+                vi[2][i] = ((v2 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+                vi[3][i] = ((v3 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+            }
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {
+                float sumf = 0.0f;
+#pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    const Q81Block* xb = x + j * x_stride + kb * 8 + 4 * n + k;
+                    const g906_v4a u = *reinterpret_cast<const g906_v4a*>(xb->qs + l0);
+                    int sacc = STRATA_DP4A(vi[k][0], u[0], 0);
+                    sacc = STRATA_DP4A(vi[k][1], u[1], sacc);
+                    sacc = STRATA_DP4A(vi[k][2], u[2], sacc);
+                    sacc = STRATA_DP4A(vi[k][3], u[3], sacc);
+                    sumf += __low2float(xb->ds) * float(sacc * sc[k]);
+                }
+                tmp[j] += d * sumf;
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            float v = tmp[j];
+#pragma unroll
+            for (int off = 32; off > 0; off >>= 1) v += __shfl_xor(v, off, 64);
+            if (lane == 0) y[std::size_t(j) * n_out + row] = v;
+        }
+    }
+}
 template<typename F, int NCOLS>
 void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    if constexpr (std::is_same_v<F, Q6KTraits>) {
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
+        if (g_g906_q6k && lds <= 49152 && (n_in <= 4096 || NCOLS <= 3)) {   // measured: past 4096 inputs the wave kernel wins at T >= 4
+            static const int rpb_env = [] { const char* e = std::getenv("STRATA_G906_RPB"); return e ? std::atoi(e) : 0; }();
+            int rpb = rpb_env > 0 ? rpb_env : (n_out / 256) & ~3;
+            rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
+            g906_q6k_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+            return;
+        }
+    }
     constexpr int R = 1;
     const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
     native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
