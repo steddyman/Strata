@@ -1040,7 +1040,7 @@ def driver_notice(have: str | None, need: str) -> str:
 
 #: The AMD card families a person knows by the box they bought, for the one plain line when a build is for another family.
 HIP_FAMILIES = (("RX 9000", ("gfx1200", "gfx1201")), ("RX 7000", ("gfx1100", "gfx1101", "gfx1102")), ("RX 6000", ("gfx1030", "gfx1031")),
-                ("Ryzen AI Max", ("gfx1151",)))
+                ("Ryzen AI Max", ("gfx1151",)), ("Vega 20", ("gfx906",)))   # Vega 20: Radeon VII / Pro VII / Pro Vega II, Instinct MI50 / MI60
 
 
 def hip_family(arch: str) -> str:

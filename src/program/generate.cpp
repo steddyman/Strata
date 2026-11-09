@@ -5751,11 +5751,20 @@ int main(int argc, char** argv) {
         static const char* ae = std::getenv("STRATA_PIPELINE_AUTO");
         static const char* am = std::getenv("STRATA_PIPELINE_AUTO_MIN_STAGES");
         // two stages pay off only with the drafter on the first card (0.1.44, mtp_first): its chain no longer shares the last card with the window
+        // gfx906 (wave64 build): two stages pay off without mtp_first too.  Measured on a Radeon Pro Vega II Duo (2x gfx906,
+        // IQ3_S, MTP, --layer-split auto, serve): decode 38.4 tok/s pipelined against 36.3 serial, prompt reading unchanged.
+#if defined(STRATA_HIP_GFX906)
+        constexpr bool two_stage_pw = true;
+#else
+        constexpr bool two_stage_pw = false;
+#endif
         const size_t min_st = am != nullptr ? (size_t) std::max(2, std::atoi(am))
-                                            : (mtp_first_ok && mtp_first_default_on() ? 2 : 3);
+                                            : (two_stage_pw || (mtp_first_ok && mtp_first_default_on()) ? 2 : 3);
         bool on = o.serve && multi_gpu && !split_same && split_devs.size() + 1 >= min_st && !(ae != nullptr && std::atoi(ae) == 0);
 #if defined(STRATA_USE_HIP)
         on = on && decode_defaults_arch_ok();
+#elif defined(STRATA_HIP_GFX906)
+        // on, as above
 #else
         on = false;
 #endif

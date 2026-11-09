@@ -4,7 +4,9 @@
 # Run on a Linux box that has ROCm (TheRock Python wheels are enough); the tester packages were built in an Ubuntu 22.04 chroot
 # (glibc 2.35) so they run on every distribution since.  All settings are environment variables:
 #
-#   VARIANT=rx9070     rx9070 (gfx1200 gfx1201) | rx7900 (gfx1100 gfx1101 gfx1102) | rx6000 (gfx1030 gfx1031) | halo (gfx1151) | igpu (gfx1103 gfx1150) | a name + ARCHS=
+#   VARIANT=rx9070     rx9070 (gfx1200 gfx1201) | rx7900 (gfx1100 gfx1101 gfx1102) | rx6000 (gfx1030 gfx1031) | halo (gfx1151) | igpu (gfx1103 gfx1150)
+#                      | gfx906 (Radeon VII, Radeon Pro VII / Vega II, Instinct MI50 / MI60: the wave64 STRATA_HIP_GFX906 build, ROCm from
+#                        TheRock's gfx906 index) | a name + ARCHS=
 #   ARCHS="gfx1200;gfx1201"          the code objects (default: the variant's)
 #   SRC=<this checkout>              the Strata source (default: the checkout this script is in)
 #   LLAMA=<llama.cpp checkout>       at the pinned commit (setup.py LLAMA_CPP_COMMIT); mtmd and ggml come from it
@@ -36,9 +38,14 @@ case "$V" in
   rx6000) ARCHS=${ARCHS:-gfx1030;gfx1031} ;;   # RDNA2: no WMMA (plain kernels), no hipBLASLt kernels; built, not tested on a real RX 6000 card
   halo)   ARCHS=${ARCHS:-gfx1151} ;;
   igpu)   ARCHS=${ARCHS:-gfx1103;gfx1150} ;;
+  gfx906) ARCHS=${ARCHS:-gfx906} ;;           # Vega 20 (wave64): the CUDA sources compiled as HIP (STRATA_HIP_GFX906), no WMMA, no hipBLASLt
   *)      ARCHS=${ARCHS:?ARCHS=gfx...} ;;
 esac
 NOTE_EXTRA=""; [ "$V" = rx6000 ] && NOTE_EXTRA=" (built, not tested on a real RX 6000 card)"
+[ "$V" = gfx906 ] && NOTE_EXTRA=" (wave64 gfx906 build: Qwen3.8-Flash-Next only, no Qwen3.6 or DeepSeek)"
+# the engine's backend switches: the wave32 HIP backend, or for gfx906 the wave64 build that compiles the CUDA sources as HIP
+ENGINE_DEFS=(-DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_PREFILL_MMQ=ON)
+[ "$V" = gfx906 ] && ENGINE_DEFS=(-DSTRATA_HIP_GFX906=ON -DCMAKE_C_COMPILER=$HP/llvm/bin/clang -DCMAKE_CXX_COMPILER=$HP/llvm/bin/clang++)
 if [ -z "${DSV41:-}" ]; then DSV41=0; [ "$V" = rx9070 ] && DSV41=1; fi
 ARCHLIST=${ARCHS//;/ }
 DATAARCH=${ARCHS//;/,}
@@ -60,8 +67,8 @@ cd "$SRC" || exit 1
 if [ -z "${VISION_ONLY:-}" ]; then
   # STRATA_CMAKE_EXTRA: more configure arguments for the engine build, e.g. -DSTRATA_GEOMETRY_FILE=/abs/path/geometry.hpp (a new model shape)
   # shellcheck disable=SC2086
-  cmake -G Ninja -S . -B "$OUT/b" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=OFF \
-    -DSTRATA_PREFILL_MMQ=ON "-DCMAKE_HIP_ARCHITECTURES=$ARCHS" "${HIPDEFS[@]}" -DSTRATA_GGML_DIR="$LLAMA" -DSTRATA_PORTABLE=ON \
+  cmake -G Ninja -S . -B "$OUT/b" -DCMAKE_BUILD_TYPE=Release "${ENGINE_DEFS[@]}" -DSTRATA_BUILD_TESTS=OFF \
+    "-DCMAKE_HIP_ARCHITECTURES=$ARCHS" "${HIPDEFS[@]}" -DSTRATA_GGML_DIR="$LLAMA" -DSTRATA_PORTABLE=ON \
     "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath,'\$ORIGIN' -Wl,--enable-new-dtags" ${STRATA_CMAKE_EXTRA:-} > "$OUT/cfg.log" 2>&1
   chk $? "engine configured"
   nice -n 10 cmake --build "$OUT/b" --target strata -j "$JOBS" > "$OUT/build.log" 2>&1

@@ -103,7 +103,7 @@ class Gfx1201(Base):
         self.assertEqual(en["df22"], drafting.LINE_AUTO_MTP)
 
     def test_it_is_one_entry_and_removing_it_puts_auto_back(self):
-        self.assertEqual(list(drafting.AUTO_MTP), [("hip", "gfx1201")])
+        self.assertEqual(list(drafting.AUTO_MTP), [("hip", "gfx1201"), ("hip", "gfx906")])
         self.assertIn("stall", drafting.AUTO_MTP[("hip", "gfx1201")])
         with mock.patch.dict(drafting.AUTO_MTP, clear=True):
             d, args = self.apply(IQ3S, R9700)
@@ -137,3 +137,15 @@ class EverythingElseIsUnchanged(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Gfx906(unittest.TestCase):
+    """Vega 20 (the gfx906 fork build): Auto starts the MTP, which decodes faster there and keeps the two-card pipeline."""
+
+    def test_auto_is_the_mtp_and_a_choice_by_name_still_wins(self):
+        name = "qwen3.8-flash-next-iq3_s"
+        self.assertTrue(drafting.auto_mtp_only("hip", ["gfx906", "gfx906"]))
+        self.assertEqual(drafting.choice_of("auto", model_name=name, backend="hip", archs=["gfx906", "gfx906"]), "mtp")
+        self.assertEqual(drafting.choice_of("dflash2", model_name=name, backend="hip", archs=["gfx906"]),
+                         "dflash2" if drafting.can_run_dflash2(name, None, "hip", ["gfx906"]) else "mtp")
+        self.assertEqual(drafting.choice_of("off", model_name=name, backend="hip", archs=["gfx906"]), "off")

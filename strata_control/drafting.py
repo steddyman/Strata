@@ -356,7 +356,10 @@ MODEL_PREFIX = "qwen3.8-flash-next-"
 #: Cards where Auto starts the MTP instead of DFlash2 (owner 11-06 ~10:30), keyed (engine family, first architecture); the value is why. ONE ENTRY, delete it to put Auto back.
 #: gfx1201 (RX 9070 / R9700 class): the open DFlash2 PROMPT STALL, 11 of 50 engines on 0.2.11 never got past the prompt, until PE-RDNA4's fix lands. Only Auto is affected: DFlash2 chosen
 #: by name (the Drafting step, the app's dropdown, `--drafting dflash2`, a saved "drafting": "dflash2") still starts DFlash2, and every other card and platform is unchanged.
-AUTO_MTP = {("hip", "gfx1201"): "the DFlash2 prompt stall (11 of 50 engines on 0.2.11); PE-RDNA4's fix is pending"}
+AUTO_MTP = {("hip", "gfx1201"): "the DFlash2 prompt stall (11 of 50 engines on 0.2.11); PE-RDNA4's fix is pending",
+            # Radeon Pro Vega II Duo (2x gfx906, IQ3_S, layer split): MTP decodes 36.3 tok/s against DFlash2's 31.2, and
+            # only the MTP keeps --pipeline-windows (38.4 tok/s)
+            ("hip", "gfx906"): "MTP decodes faster than DFlash2 on Vega 20 and keeps the two-card pipeline"}
 
 
 def set_of(model_name: str | None) -> str:
