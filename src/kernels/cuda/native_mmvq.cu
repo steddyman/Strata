@@ -2364,8 +2364,26 @@ void launch_check() {
 // butterfly instead of the LDS partials and __syncthreads of the one-block-per-row layout: on gfx906 a block per
 // 2 KB row spent most of its time being launched and joined.  The SAME kernel serves every column count 1..8, so a
 // column's sums do not depend on how many columns (verify tokens) ride along.  STRATA_MMVQ_WAVE=0: the CUDA layout.
+// gfx906: a 64-lane float sum with DPP lane moves instead of a ds_bpermute butterfly (Vega 7nm ISA 13.3.9: quad_perm,
+// row_half_mirror, row_mirror, row_bcast15/31 - VALU ops with 2 wait states, no LDS round trip).  The full sum lands in
+// lane 63.  The order is fixed per lane set, so a column's sum does not depend on the other columns.  STRATA_G906_DPP=0:
+// the butterfly.
+template<int CTRL, int ROW_MASK>
+__device__ __forceinline__ float g906_dpp(float v) {
+    return __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), CTRL, ROW_MASK, 0xf, false));
+}
+__device__ __forceinline__ float g906_wave_sum_dpp(float v) {
+    v += g906_dpp<0xb1, 0xf>(v);    // quad_perm [1,0,3,2]
+    v += g906_dpp<0x4e, 0xf>(v);    // quad_perm [2,3,0,1]: each quad's sum in its four lanes
+    v += g906_dpp<0x141, 0xf>(v);   // row_half_mirror: each 8 lanes' sum
+    v += g906_dpp<0x140, 0xf>(v);   // row_mirror: each row of 16's sum, in every lane of the row
+    v += g906_dpp<0x142, 0xa>(v);   // row_bcast15 into rows 1 and 3: row 1 = r0 + r1, row 3 = r2 + r3
+    v += g906_dpp<0x143, 0xc>(v);   // row_bcast31 into rows 2 and 3: row 3 = r0 + r1 + r2 + r3
+    return v;                       // lane 63 holds the wavefront's sum
+}
+bool g_g906_dpp = !(std::getenv("STRATA_G906_DPP") && std::string(std::getenv("STRATA_G906_DPP")) == "0");
 bool g_wave_off = std::getenv("STRATA_MMVQ_WAVE") && std::string(std::getenv("STRATA_MMVQ_WAVE")) == "0";
-template<typename F, int NCOLS, int R>
+template<typename F, int NCOLS, int R, bool DPP = false>
 __launch_bounds__(256)
 __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
                                         float* __restrict__ y, int n_in, int n_out) {
@@ -2394,9 +2412,14 @@ __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w,
 #pragma unroll
         for (int i = 0; i < R; ++i) {
             float v = tmp[j][i];
+            if constexpr (DPP) {
+                v = g906_wave_sum_dpp(v);
+                if (lane == 63 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
+            } else {
 #pragma unroll
-            for (int off = 32; off > 0; off >>= 1) v += __shfl_xor(v, off, 64);
-            if (lane == 0 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
+                for (int off = 32; off > 0; off >>= 1) v += __shfl_xor(v, off, 64);
+                if (lane == 0 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
+            }
         }
 }
 // ---- gfx906 Q6_K (STRATA_G906_Q6K=0: the wave kernel above).  One wavefront per row; a lane takes 64 weights of one
@@ -2470,10 +2493,8 @@ __global__ void g906_q6k_kernel(const Q6KBlock* __restrict__ w, const Q81Block* 
         }
 #pragma unroll
         for (int j = 0; j < NCOLS; ++j) {
-            float v = tmp[j];
-#pragma unroll
-            for (int off = 32; off > 0; off >>= 1) v += __shfl_xor(v, off, 64);
-            if (lane == 0) y[std::size_t(j) * n_out + row] = v;
+            const float v = g906_wave_sum_dpp(tmp[j]);
+            if (lane == 63) y[std::size_t(j) * n_out + row] = v;
         }
     }
 }
@@ -2483,7 +2504,9 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
     if constexpr (std::is_same_v<F, Q6KTraits>) {
         const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
-        if (g_g906_q6k && lds <= 49152 && (n_in <= 4096 || NCOLS <= 3)) {   // measured: past 4096 inputs the wave kernel wins at T >= 4
+        // by shape only, never by column count (a column's sums must not depend on how many columns ride along): past 4096
+        // inputs the wave kernel is as fast on average (it wins at T >= 3, this one at T <= 2)
+        if (g_g906_q6k && lds <= 49152 && n_in <= 4096) {
             static const int rpb_env = [] { const char* e = std::getenv("STRATA_G906_RPB"); return e ? std::atoi(e) : 0; }();
             int rpb = rpb_env > 0 ? rpb_env : (n_out / 256) & ~3;
             rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
@@ -2493,7 +2516,8 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
     }
     constexpr int R = 1;
     const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
-    native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+    if (g_g906_dpp) native_mmvq_wave_kernel<F, NCOLS, R, true><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+    else native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
 }
 template<typename F>
 void wave_launch(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {

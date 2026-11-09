@@ -3879,6 +3879,16 @@ int main(int argc, char** argv) {
         } else (void) cudaGetLastError();
     }
 #endif
+#if defined(STRATA_HIP_GFX906)
+    {   // gfx906: its measured switches on by default, before any engine code reads them (arch_defaults.cpp)
+        const auto set = strata::core::apply_gfx906_defaults();
+        if (!set.empty()) {
+            std::fprintf(stderr, "strata: gfx906 defaults on (STRATA_GFX906_DEFAULTS=0 turns them off; a switch you set is kept):");
+            for (const auto& name : set) std::fprintf(stderr, " %s", name.c_str() + 7);
+            std::fprintf(stderr, "\n");
+        }
+    }
+#endif
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL) && !defined(_WIN32)
     // Linux CUDA, 2 or more batch slots: the exact parallel-request stack is the engine's own default (QUAL-PAR bit-exact; it was the launcher's
     // PARALLEL_STACK_ENV).  Each switch keeps =0 as its off switch and a value the user set is kept.  Before any engine code reads them.

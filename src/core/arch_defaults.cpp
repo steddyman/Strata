@@ -276,6 +276,33 @@ std::vector<std::pair<std::string, std::string>> launch_default_env(const char* 
     return t;
 }
 
+// gfx906 (Vega 20: Radeon VII / Pro VII / Pro Vega II, MI50 / MI60), the STRATA_HIP_GFX906 build, which does not run the
+// STRATA_USE_HIP start-up block that applies arch_default_env.  Each entry was measured on a Radeon Pro Vega II Duo (two
+// dies, Qwen3.8-Flash-Next IQ3_S, layer split, MTP, --pipeline-windows 2; tools/gfx906/decode_ab.py, docs/GFX906_KERNEL_PLAN.md).
+// Measured together (2026-11-09): 48.6 -> 46.75 ms per window, each alone 47.8-48.2; within noise alone: STRATA_FUSE_HITS,
+// STRATA_FUSE_WAIT, STRATA_FUSE_CONVAB, STRATA_QFUSE(_HC), STRATA_SIDE_MIXER, STRATA_HC_PERSIST, STRATA_NORM_ROPE; slower:
+// STRATA_SH_STREAM=0 (the shared expert's own stream pays on gfx906, unlike RDNA).
+std::vector<std::pair<std::string, std::string>> gfx906_default_env() {
+    return {
+        {"STRATA_EXP_MODE", "8"},                       // experts: gate/up + SwiGLU + q8_1 in one kernel (native_gu_fused_kernel)
+        {"STRATA_GFX906_ATTN_QUERY_SWIZZLE", "1"},      // QSA decode attention: the gfx906 query layout (int8 KV)
+        {"STRATA_GFX906_ATTN_REDUCE12", "1"},           // ... and its 12-lane reduction
+        {"STRATA_LFUSE", "1"},                          // router + shared-expert gate in one BF16 projection
+        {"STRATA_MMVF_ROWS", "1"},                      // ... with the rows kernel
+    };
+}
+
+std::vector<std::string> apply_gfx906_defaults() {
+    std::vector<std::string> set;
+    if (const char* v = std::getenv("STRATA_GFX906_DEFAULTS"); v != nullptr && v[0] == '0') return set;
+    for (const auto& kv : gfx906_default_env()) {
+        if (std::getenv(kv.first.c_str()) != nullptr) continue;   // the user's setting wins, whatever it is
+        set_default(kv);
+        set.push_back(kv.first);
+    }
+    return set;
+}
+
 std::vector<std::string> apply_arch_defaults(const char* gcn_arch, bool integrated, int batch_slots) {
     std::vector<std::string> set;
     // the community-made gfx1010 / gfx1030 changes (amd_community.hpp): one line, and only on those two cards

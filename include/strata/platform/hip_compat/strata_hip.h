@@ -19,6 +19,7 @@
 #include <hip/hip_fp16.h>
 
 #include <cstdint>
+#include <type_traits>
 #include <cstdlib>
 
 #define STRATA_HIP_GFX906 1
@@ -195,11 +196,50 @@ inline hipError_t cudaInitDevice(int device, unsigned int device_flags, unsigned
 // ---- device side -----------------------------------------------------------------------------------------
 #if defined(__HIP_DEVICE_COMPILE__) || defined(__HIPCC__)
 
+// __shfl_xor_sync with a compile-time lane mask below the width moves the same lane's value without an LDS address round
+// trip (Vega 7nm ISA 13.3.9 DPP, DS_SWIZZLE_B32): xor 1 / 2 = one quad_perm, xor 4 = quad reverse then row_half_mirror,
+// xor 8 = row_ror:8, xor 16 = ds_swizzle (bit mode, 32-lane groups).  Bit for bit what ds_bpermute returns (the values
+// are only moved).  Any other mask or width, a run-time mask, or a type that is not 4 bytes: HIP's __shfl_xor (ds_bpermute).
+// -DSTRATA_SHFL_DPP=0 builds without it.
+#ifndef STRATA_SHFL_DPP
+#define STRATA_SHFL_DPP 1
+#endif
+template<int CTRL>
+static __device__ __forceinline__ int strata_dpp_mov(int v) { return __builtin_amdgcn_update_dpp(0, v, CTRL, 0xf, 0xf, false); }
+static __device__ __forceinline__ int strata_xor_lanes_const(int v, int m) {
+    switch (m) {
+        case 1: return strata_dpp_mov<0xb1>(v);                          // quad_perm [1,0,3,2]
+        case 2: return strata_dpp_mov<0x4e>(v);                          // quad_perm [2,3,0,1]
+        case 4: return strata_dpp_mov<0x141>(strata_dpp_mov<0x1b>(v));    // quad_perm [3,2,1,0], then row_half_mirror
+        case 8: return strata_dpp_mov<0x128>(v);                         // row_ror:8
+        default: return __builtin_amdgcn_ds_swizzle(v, 0x401f);          // 16: bit mode, and 0x1f, xor 0x10
+    }
+}
+template<typename T>
+static __device__ __forceinline__ T strata_shfl_xor(T var, int lane_mask, int width) {
+#if STRATA_SHFL_DPP
+    if constexpr (sizeof(T) == 4 && std::is_trivially_copyable<T>::value) {
+        if (__builtin_constant_p(lane_mask) && __builtin_constant_p(width) &&
+            (lane_mask == 1 || lane_mask == 2 || lane_mask == 4 || lane_mask == 8 || lane_mask == 16) && lane_mask < width &&
+            width <= 64)
+            return __builtin_bit_cast(T, strata_xor_lanes_const(__builtin_bit_cast(int, var), lane_mask));
+    }
+#endif
+    return (__shfl_xor)(var, lane_mask, width);   // parenthesized: HIP's function, not the macro below
+}
+
 // Logical 32-lane warps (see the header comment).  The width argument, when given, wins.
 #define __shfl_sync(mask, var, lane, ...) __shfl(var, lane, STRATA_SHFL_W(__VA_ARGS__))
 #define __shfl_up_sync(mask, var, delta, ...) __shfl_up(var, delta, STRATA_SHFL_W(__VA_ARGS__))
 #define __shfl_down_sync(mask, var, delta, ...) __shfl_down(var, delta, STRATA_SHFL_W(__VA_ARGS__))
-#define __shfl_xor_sync(mask, var, lanemask, ...) __shfl_xor(var, lanemask, STRATA_SHFL_W(__VA_ARGS__))
+#define __shfl_xor_sync(mask, var, lanemask, ...) strata_shfl_xor(var, lanemask, STRATA_SHFL_W(__VA_ARGS__))
+// Direct __shfl_xor calls (the gfx906 kernels write them with width 64) take the same path; HIP's default width is the
+// wavefront.  The cuda_runtime-style function stays reachable as (__shfl_xor)(...).
+#if STRATA_SHFL_DPP
+#define __shfl_xor(var, lanemask, ...) strata_shfl_xor(var, lanemask, STRATA_SHFL_W64(__VA_ARGS__))
+#define STRATA_SHFL_W64(...) STRATA_SHFL_W_I(dummy, ##__VA_ARGS__, STRATA_SHFL_W_GIVEN, STRATA_SHFL_W64_DEFAULT)(__VA_ARGS__)
+#define STRATA_SHFL_W64_DEFAULT() 64
+#endif
 // STRATA_SHFL_W() -> 32, STRATA_SHFL_W(w) -> w
 #define STRATA_SHFL_W(...) STRATA_SHFL_W_I(dummy, ##__VA_ARGS__, STRATA_SHFL_W_GIVEN, STRATA_SHFL_W_DEFAULT)(__VA_ARGS__)
 #define STRATA_SHFL_W_I(d, a, b, ...) b
