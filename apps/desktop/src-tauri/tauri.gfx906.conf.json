@@ -1,0 +1,14 @@
+{
+  "bundle": {
+    "resources": {
+      "resources/engine-bundle": "engine-bundle"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/steddyman/Strata/releases/latest/download/latest-gfx906.json"
+      ]
+    }
+  }
+}

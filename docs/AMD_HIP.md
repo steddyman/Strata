@@ -576,6 +576,15 @@ ninja -C build-906 strata
 `--device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --ulimit memlock=-1`; on some boards
 `HSA_OVERRIDE_GFX_VERSION=9.0.6` is needed for the runtime to accept the card.
 
+**Without Docker: TheRock's gfx906 wheels.** AMD's nightly index https://rocm.nightlies.amd.com/v2/gfx906/ has ROCm 7.14 with
+rocBLAS and hipBLAS for gfx906 (`rocm[libraries,devel]==7.14.0a20260612`, installed into a venv, no sudo). With it,
+`VARIANT=gfx906 packaging/build_hip_linux.sh` builds an engine package (the engine and both picture readers).
+
+**The desktop app for gfx906.** `packaging/build_appimage_gfx906.sh --appimage <the official Strata AppImage>` builds an AppImage with that
+engine package inside (`engine-bundle`), so the app installs it on first start instead of looking for one in the update feed. The
+official AppImage only supplies the already built DeepSeek Harness folder. The app's updater looks at this fork's releases
+(`tauri.gfx906.conf.json`), so an update cannot replace it with an AppImage that has no gfx906 engine.
+
 **What differs from the CUDA build** (each A/B switch restores the CUDA layout, and was checked bitwise against it):
 
 | | gfx906 | Switch |

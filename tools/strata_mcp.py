@@ -1945,7 +1945,7 @@ def windows_video_controllers() -> list:
     return [{"name": x.get("Name"), "driver": x.get("DriverVersion")} for x in d if isinstance(x, dict)]
 
 
-KFD_SUPPORTED = ("gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030", "gfx1031", "gfx1151")
+KFD_SUPPORTED = ("gfx1100", "gfx1101", "gfx1102", "gfx1200", "gfx1201", "gfx1030", "gfx1031", "gfx1151", "gfx906")   # gfx906: the wave64 engine package (VARIANT=gfx906)
 
 
 def kfd_gpus(sysfs: str = "/sys") -> list:
