@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
     struct Case { const char* what; const char* fmt; int n_in, n_out; };
     std::vector<Case> cases = {
         {"GDN qkv", "Q6_K", 2560, 10240}, {"GDN out", "Q6_K", 6144, 2560}, {"GDN z", "Q4_K", 2560, 6144},
-        {"QSA out", "Q4_K", 6144, 2560}, {"QSA q", "IQ4_XS", 2560, 12288}, {"shexp dn", "IQ4_NL", 640, 2560},
+        {"QSA out", "Q4_K", 6144, 2560}, {"QSA q", "IQ4_XS", 2560, 12288}, {"shexp dn", "IQ4_NL", 640, 2560}, {"shexp gate", "Q4_K", 2560, 640},
     };
     std::mt19937 rng(1);
     for (auto& c : cases) {

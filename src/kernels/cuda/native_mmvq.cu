@@ -2498,6 +2498,153 @@ __global__ void g906_q6k_kernel(const Q6KBlock* __restrict__ w, const Q81Block* 
         }
     }
 }
+// ---- gfx906 Q4_K (STRATA_G906_Q4K=0: the wave kernel).  One wavefront per row; a lane takes one 64-value chunk j of
+// a block (sub-blocks 2j and 2j + 1): the block's 16-byte header (dm and the 12 scale bytes; 144-byte blocks are 16-byte
+// aligned in rows of 2560) and its 32 qs bytes in two 16-byte loads.  The activations and each q8_1 block's integer sum
+// (the sumf_m term of vec_dot_q4_K_q8_1_impl_vmmq, computed once here instead of per row) are staged in LDS.  The same
+// expression per sub-block as q4_q8_dot_impl, summed in another order: rounding-level, columns exact across T.
+bool g_g906_q4k = !(std::getenv("STRATA_G906_Q4K") && std::string(std::getenv("STRATA_G906_Q4K")) == "0");
+template<int NCOLS>
+__launch_bounds__(256)
+__global__ void g906_q4k_kernel(const Q4KBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int g906_xs4[];
+    const int x_stride = n_in / Q8K;
+    const int words = NCOLS * x_stride * int(sizeof(Q81Block) / 4);
+    int* isum = g906_xs4 + words;                        // NCOLS * x_stride integer sums
+    {
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xs4[i] = src[i];
+        for (int b = int(threadIdx.x); b < NCOLS * x_stride; b += 256) {
+            const int* q = reinterpret_cast<const int*>(xg[b].qs);
+            int sacc = 0;
+#pragma unroll
+            for (int k = 0; k < 8; ++k) sacc = STRATA_DP4A(0x01010101, q[k], sacc);
+            isum[b] = sacc;
+        }
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xs4);
+    const int lane = int(threadIdx.x) & 63;
+    const int bpr = n_in / 256;
+    const int row_end = min(n_out, int(blockIdx.x) * rows_per_block + rows_per_block);
+    for (int row = int(blockIdx.x) * rows_per_block + (int(threadIdx.x) >> 6); row < row_end; row += 4) {
+        float tmp[NCOLS] = {};
+        for (int t = lane; t < 4 * bpr; t += 64) {
+            const int kb = t >> 2, j = t & 3;
+            const Q4KBlock* b = w + std::size_t(row) * bpr + kb;
+            const g906_v4a hdr = *reinterpret_cast<const g906_v4a*>(b);          // dm, scales[0..11]
+            const g906_v4a q0 = *reinterpret_cast<const g906_v4a*>(b->qs + 32 * j);
+            const g906_v4a q1 = *reinterpret_cast<const g906_v4a*>(b->qs + 32 * j + 16);
+            const float2 dm = __half22float2(__builtin_bit_cast(half2, hdr[0]));
+            // scales[0..3] = hdr[1], [4..7] = hdr[2], [8..11] = hdr[3]; bytes taken with shifts (indexing the
+            // register vector's bytes would put it in scratch memory)
+            const unsigned s0 = unsigned(hdr[1]), s1 = unsigned(hdr[2]), s2 = unsigned(hdr[3]);
+            int sc[2], mn[2];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int sb = 2 * j + h, k = sb & 3, sh = 8 * k;
+                const unsigned b0 = (s0 >> sh) & 0xffu, b1 = (s1 >> sh) & 0xffu, b2 = (s2 >> sh) & 0xffu;
+                if (sb < 4) { sc[h] = int(b0 & 63u); mn[h] = int(b1 & 63u); }
+                else {
+                    sc[h] = int((b2 & 0x0fu) | ((b0 >> 6) << 4));
+                    mn[h] = int((b2 >> 4) | ((b1 >> 6) << 4));
+                }
+            }
+            const int qv[8] = {q0[0], q0[1], q0[2], q0[3], q1[0], q1[1], q1[2], q1[3]};
+#pragma unroll
+            for (int c = 0; c < NCOLS; ++c) {
+                float sumf_d = 0.0f, sumf_m = 0.0f;
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {                  // h = 0: low nibbles (sub-block 2j), 1: high (2j + 1)
+                    const int qb = c * x_stride + kb * 8 + 2 * j + h;
+                    const Q81Block* xb = x + qb;
+                    const g906_v4a u0 = *reinterpret_cast<const g906_v4a*>(xb->qs);
+                    const g906_v4a u1 = *reinterpret_cast<const g906_v4a*>(xb->qs + 16);
+                    int dot = 0;
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A((qv[k] >> (4 * h)) & 0x0f0f0f0f, u0[k], dot);
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A((qv[4 + k] >> (4 * h)) & 0x0f0f0f0f, u1[k], dot);
+                    const float d8 = __low2float(xb->ds);
+                    sumf_d += d8 * (dot * sc[h]);
+                    sumf_m += d8 * (isum[qb] * mn[h]);
+                }
+                tmp[c] += dm.x * sumf_d - dm.y * sumf_m;
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float v = g906_wave_sum_dpp(tmp[c]);
+            if (lane == 63) y[std::size_t(c) * n_out + row] = v;
+        }
+    }
+}
+// ---- gfx906 IQ4_XS (STRATA_G906_IQ4XS=0: the wave kernel).  As g906_q4k_kernel: a lane takes two 32-value sub-blocks
+// (2p, 2p + 1) of a block - its 8-byte header and 32 qs bytes in two 16-byte loads - and looks them up in the IQ4 table
+// once for every column; activations staged in LDS.  Per sub-block the integer dot is IQ4XSTraits::apply's, in its order.
+bool g_g906_iq4xs = !(std::getenv("STRATA_G906_IQ4XS") && std::string(std::getenv("STRATA_G906_IQ4XS")) == "0");
+typedef int g906_v2a __attribute__((ext_vector_type(2), aligned(4)));
+template<int NCOLS>
+__launch_bounds__(256)
+__global__ void g906_iq4xs_kernel(const IQ4XSBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                  int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int g906_xsx[];
+    const int x_stride = n_in / Q8K;
+    {
+        const int words = NCOLS * x_stride * int(sizeof(Q81Block) / 4);
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xsx[i] = src[i];
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xsx);
+    const int lane = int(threadIdx.x) & 63;
+    const int bpr = n_in / 256;
+    const int row_end = min(n_out, int(blockIdx.x) * rows_per_block + rows_per_block);
+    for (int row = int(blockIdx.x) * rows_per_block + (int(threadIdx.x) >> 6); row < row_end; row += 4) {
+        float tmp[NCOLS] = {};
+        for (int t = lane; t < 4 * bpr; t += 64) {
+            const int kb = t >> 2, pp = t & 3;
+            const IQ4XSBlock* b = w + std::size_t(row) * bpr + kb;
+            const g906_v2a hdr = *reinterpret_cast<const g906_v2a*>(b);         // d | scales_h << 16, scales_l[0..3]
+            const g906_v4 q0 = *reinterpret_cast<const g906_v4*>(b->qs + 32 * pp);
+            const g906_v4 q1 = *reinterpret_cast<const g906_v4*>(b->qs + 32 * pp + 16);
+            const float dw = __half2float(__builtin_bit_cast(half, (unsigned short) (unsigned(hdr[0]) & 0xffffu)));
+            const unsigned sh = unsigned(hdr[0]) >> 16, sl = (unsigned(hdr[1]) >> (8 * pp)) & 0xffu;
+            int ls[2];
+            int2 v[2][4];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int ib = 2 * pp + h;
+                ls[h] = int(((sl >> (4 * h)) & 0x0fu) | (((sh >> (2 * ib)) & 0x03u) << 4)) - 32;
+            }
+#pragma unroll
+            for (int j = 0; j < 4; ++j) { v[0][j] = iq4_table_lookup(q0[j]); v[1][j] = iq4_table_lookup(q1[j]); }
+#pragma unroll
+            for (int c = 0; c < NCOLS; ++c) {
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const Q81Block* xb = x + c * x_stride + kb * 8 + 2 * pp + h;
+                    const g906_v4a ua = *reinterpret_cast<const g906_v4a*>(xb->qs);
+                    const g906_v4a ub = *reinterpret_cast<const g906_v4a*>(xb->qs + 16);
+                    int sumi = 0;
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        sumi = STRATA_DP4A(v[h][j].x, ua[j], sumi);
+                        sumi = STRATA_DP4A(v[h][j].y, ub[j], sumi);
+                    }
+                    sumi *= ls[h];
+                    tmp[c] += (dw * __low2float(xb->ds)) * sumi;
+                }
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float v2 = g906_wave_sum_dpp(tmp[c]);
+            if (lane == 63) y[std::size_t(c) * n_out + row] = v2;
+        }
+    }
+}
 template<typename F, int NCOLS>
 void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
@@ -2511,6 +2658,26 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
             int rpb = rpb_env > 0 ? rpb_env : (n_out / 256) & ~3;
             rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
             g906_q6k_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+            return;
+        }
+    }
+    if constexpr (std::is_same_v<F, Q4KTraits>) {
+        // shape only (never the column count): rows of up to 4096 inputs, so every column count fits LDS
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
+        if (g_g906_q4k && n_in <= 4096 && lds <= 65536) {
+            static const int rpb4_env = [] { const char* e = std::getenv("STRATA_G906_Q4K_RPB"); return e ? std::atoi(e) : 0; }();
+            int rpb = rpb4_env > 0 ? rpb4_env : (n_out / 256) & ~3;
+            rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
+            g906_q4k_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+            return;
+        }
+    }
+    if constexpr (std::is_same_v<F, IQ4XSTraits>) {
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
+        if (g_g906_iq4xs && n_in <= 4096 && lds <= 65536) {   // shape only, as Q4_K
+            int rpb = (n_out / 256) & ~3;
+            rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
+            g906_iq4xs_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
             return;
         }
     }
