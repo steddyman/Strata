@@ -38,6 +38,20 @@ explains it: the time is spread over about 35 launches per layer, most of them w
 - Result: Q6_K 10240x2560 112 → 48 µs at T=1 (447 GB/s), 125 → 66 µs at T=2; end to end only ~2 %, because Q6_K is a
   sixth of the dense GEMV time. Every step above has to move for decode to move.
 
+## Results so far
+
+| Engine (test build) | ms per window | Decode | Quality vs 0.1.59.1 |
+| --- | ---: | ---: | --- |
+| 0.1.59.1 (stable) | 51.5 | 39 tok/s | reference |
+| + DPP / swizzle for constant `__shfl_xor` (exact) | ~50.2 | | 100.00 %, KL 0 |
+| + gfx906 defaults table (exact in the gate) | 48.4 | | 100.00 %, KL 0 |
+| + Q6_K kernel and DPP row sums (rounding order) | **44.7** | **43–45 tok/s** | 95.04 %, KL 0.0228, PPL 4.031 (control: 94.85 %, 0.0242, 4.103) |
+
+ISA notes that paid (Vega 7nm ISA, GPUOpen 26-Nov-2019): DPP `quad_perm` / `row_half_mirror` / `row_ror:8` and
+`ds_swizzle_b32` replace `ds_bpermute` for xor 1-16; DPP `row_bcast15/31` finish a 64-lane sum; `global_load_dwordx4`
+works on the GGUF blocks' 2-byte alignment. Checked and not useful here: `buffer_load ... lds` (dword-sized only),
+`v_dot8_i32_i4` (needs 4-bit activations), wider SDWA unpacking (the compiler already emits it).
+
 ## Phases
 
 Each phase lands as its own PR with: the microbenchmark numbers, the profile before/after, decode tok/s on the
@@ -49,9 +63,14 @@ three-run benchmark, and the quality gate below. Every new path keeps a `STRATA_
   kernels, the router, the expert kernels, T = 1..4, with the read roofline and a bitwise / tolerance comparison.
 - A `tools/gfx906/decode_profile.sh`: start `strata.py serve` on a test port with the profiler on, run the fixed
   prompts, print the stage table and tok/s. The stage table above is its first output.
-- Quality gate: `tools/quant_quality.py run` on the current engine as the reference, then on each candidate:
-  **top-1 agreement ≥ 99.5 % and mean KL ≤ 0.002** against the reference (the bar the repo's own rounding-level
-  changes have used). Columns must stay exact across T (`mmvq_multi_parity`'s contract) or verify breaks.
+- Quality gate: `tools/quant_quality.py run --gpu-experts` on the current engine as the reference, then on each
+  candidate, compared with `tools/quant_quality.py compare`. On this model **any** change of summation order moves
+  top-1 by about 5 % (the routers' near-ties flip, and the GDN state carries the difference along the segment): the
+  stable engine against itself is 100.00 % / KL 0, but against its own CUDA layout (`STRATA_MMVQ_WAVE=0`, a shipped
+  rounding variant) it is 94.85 % / KL 0.0242 / PPL 4.103 vs 4.080. So the bar is: **no worse than that control**
+  (top-1, mean KL) and **perplexity within it**; an exact change (data movement only) must stay at 100.00 % / KL 0.
+  Columns must stay exact across T (`mmvq_multi_parity`'s contract) or verify breaks; the kernel bench checks it.
+  The gate runs FP16 KV (fixed by the tool), so an int8-KV-only path needs its own check.
 - Note: profiling turns off the shared-expert side stream and some fusions, so the final number is always the
   un-profiled tok/s, not the stage sum.
 

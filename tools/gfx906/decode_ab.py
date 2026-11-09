@@ -16,6 +16,7 @@ Nothing of the installed app is changed; the GPUs must be free (close the Strata
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -43,12 +44,14 @@ def ask(cfg: dict, port: int, log: pathlib.Path, prompt: str, n: int):
     req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/chat/completions", body,
                                  {"Content-Type": "application/json", "Authorization": "Bearer " + cfg.get("api_key", "")})
     pos = log.stat().st_size
-    urllib.request.urlopen(req, timeout=900).read()
+    reply = json.loads(urllib.request.urlopen(req, timeout=900).read())
+    msg = reply["choices"][0]["message"]
+    text = (msg.get("reasoning_content") or msg.get("reasoning") or "") + "\n" + (msg.get("content") or "")   # a thinking model fills the first
     time.sleep(1.0)
     with open(log, encoding="utf-8", errors="replace") as f:
         f.seek(pos)
         found = LINE.findall(f.read())
-    return found[-1] if found else None
+    return (found[-1] if found else None), hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
 def run_variant(name: str, env_extra: dict, a, base: dict, doc: str) -> dict:
@@ -80,11 +83,13 @@ def run_variant(name: str, env_extra: dict, a, base: dict, doc: str) -> dict:
         engine = re.search(r"components/engine/([^/ ]+)", log.read_text(errors="replace"))
         long_d, short_d, acc = [], [], []
         reused = 0
+        digests = []
         for i in range(a.runs):
             tag = f"{a.tag}-{i}"          # the same prompts for every variant: the same greedy text, the same drafts
             for kind, prompt, n, into in (("long", f"[run {tag}]\n\n{doc}\n\nSummarise the document above in detail.", 256, long_d),
                                           ("short", f"[run {tag}] Write a 400-word story about a lighthouse keeper who finds a map.", 400, short_d)):
-                r = ask(cfg, a.port, log, prompt, n)
+                r, digest = ask(cfg, a.port, log, prompt, n)
+                digests.append(digest)
                 if r is None:
                     raise SystemExit(f"{name}: no decode line in {log}")
                 into.append(float(r[4]))
@@ -95,7 +100,7 @@ def run_variant(name: str, env_extra: dict, a, base: dict, doc: str) -> dict:
         # "strata decode timing: N windows, ... X ms/window": the window's cost, which draft acceptance barely moves
         win = [(int(n), float(ms)) for n, ms in re.findall(r"strata decode timing: (\d+) windows, .*? ([\d.]+) ms/window =", text)]
         return {"name": name, "engine": engine.group(1) if engine else "?", "long": long_d, "short": short_d,
-                "accept": statistics.mean(acc), "reused": reused, "stage_ms": float(stages[-1]) if stages else None,
+                "accept": statistics.mean(acc), "reused": reused, "texts": ",".join(digests), "stage_ms": float(stages[-1]) if stages else None,
                 "ms_window": sum(n * ms for n, ms in win) / max(1, sum(n for n, _ in win)) if win else None}
     finally:
         os.killpg(proc.pid, signal.SIGINT)
@@ -127,7 +132,7 @@ def main() -> int:
         mean = statistics.mean(r["long"] + r["short"])
         print(f"{r['name']:24s} {r['engine']:34s} " + (f"{r['ms_window']:6.2f} ms/window  " if r["ms_window"] else "") + f"decode {mean:5.1f} tok/s (long {statistics.mean(r['long']):5.1f} "
               f"short {statistics.mean(r['short']):5.1f}, min {min(r['long'] + r['short']):5.1f} max {max(r['long'] + r['short']):5.1f}) "
-              f"accept {r['accept']:.2f}" + (f"  REUSED {r['reused']} tokens" if r["reused"] else "") + (f"  stage {r['stage_ms']:.2f} ms/window" if r["stage_ms"] else ""), flush=True)
+              f"accept {r['accept']:.2f}" + (f"  REUSED {r['reused']} tokens" if r["reused"] else "") + f"  texts {r['texts']}" + (f"  stage {r['stage_ms']:.2f} ms/window" if r["stage_ms"] else ""), flush=True)
     return 0
 
 
