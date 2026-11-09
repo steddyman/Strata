@@ -583,7 +583,21 @@ rocBLAS and hipBLAS for gfx906 (`rocm[libraries,devel]==7.14.0a20260612`, instal
 **The desktop app for gfx906.** `packaging/build_appimage_gfx906.sh --appimage <the official Strata AppImage>` builds an AppImage with that
 engine package inside (`engine-bundle`), so the app installs it on first start instead of looking for one in the update feed. The
 official AppImage only supplies the already built DeepSeek Harness folder. The app's updater looks at this fork's releases
-(`tauri.gfx906.conf.json`), so an update cannot replace it with an AppImage that has no gfx906 engine.
+(`tauri.gfx906.conf.json`), so an update cannot replace it with an AppImage that has no gfx906 engine. Its engine package is
+numbered `<engine version>.<GFX906_REV>` (0.1.59.1 and up), so an app that already installed that engine version still takes a
+rebuilt one.
+
+**Defaults on two gfx906 cards.** Drafting on Auto starts the MTP draft layer, not DFlash2 (`strata_control/drafting.py` AUTO_MTP),
+and a two-stage layer split pipelines the decode (`--pipeline-windows 2`, which only the MTP keeps). Measured on a Radeon Pro Vega II
+Duo (IQ3_S, `--layer-split auto`, serve, an 8K prompt and an 85-token one, three runs each):
+
+| | Decode | Prompt |
+| --- | ---: | ---: |
+| DFlash2 (the default before) | 31.2 tok/s | 320 tok/s |
+| MTP | 36.3 tok/s | 313 tok/s |
+| MTP + `--pipeline-windows 2` (the default now) | 38.4 tok/s | 311 tok/s |
+
+`--pipeline-windows 0` or `STRATA_PIPELINE_AUTO=0` turns the pipeline off; Drafting set to DFlash2 by name still uses DFlash2.
 
 **What differs from the CUDA build** (each A/B switch restores the CUDA layout, and was checked bitwise against it):
 

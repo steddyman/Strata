@@ -12,6 +12,7 @@
 #      the official AppImage given with --appimage: the pinned DeepSeek Harness, already built), engine-bundle (step 3).
 #   5. The UI (apps/host), the Tauri AppImage with tauri.gfx906.conf.json, then repack-appimage.sh puts the payloads back byte for byte.
 #
+# GFX906_REV (default 1): the package version's fourth number, see step 3.
 # Needs: git, curl, gcc, squashfs-tools, and the Tauri libraries
 #   sudo apt install pkg-config libwebkit2gtk-4.1-dev libssl-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev
 # plus uv, cargo (rustup) and Node with npm on the PATH. Settings: WORK=~/strata-build  ROCM_VER=7.14.0a20260612  JOBS=$(nproc)
@@ -57,12 +58,15 @@ if [ "$(git -C "$LLAMA" rev-parse HEAD 2>/dev/null || true)" != "$LLAMA_COMMIT" 
 fi
 
 # 3. the engine package
-PKGVER=$(sed -n 's/^PKGVER=\${PKGVER:-\([0-9.]*\)}.*/\1/p' "$SRC/packaging/build_hip_linux.sh")
+# the package is <engine version>.<GFX906_REV>: an app that already installed this engine version takes a rebuilt one only
+# when its version is higher (apps/host/server/bundled-engine.mjs), so raise GFX906_REV whenever the engine code changes
+GFX906_REV=${GFX906_REV:-1}
+PKGVER=$(sed -n 's/^PKGVER=\${PKGVER:-\([0-9.]*\)}.*/\1/p' "$SRC/packaging/build_hip_linux.sh").$GFX906_REV
 ENGINE_OUT="$WORK/work-gfx906"
 PKG="$ENGINE_OUT/components/engine/$PKGVER-linux-x86_64-hip-gfx906"
 if [ "$FORCE" = 1 ] || [ ! -f "$PKG/engine-component.json" ]; then
   say "engine $PKGVER for gfx906"
-  VARIANT=gfx906 LLAMA="$LLAMA" HP="$HP" CORE="$CORE" LIBW="$LIBW" OUT="$ENGINE_OUT" COMMIT="$(git -C "$SRC" rev-parse HEAD)" \
+  VARIANT=gfx906 PKGVER="$PKGVER" LLAMA="$LLAMA" HP="$HP" CORE="$CORE" LIBW="$LIBW" OUT="$ENGINE_OUT" COMMIT="$(git -C "$SRC" rev-parse HEAD)" \
     JOBS="$JOBS" bash "$SRC/packaging/build_hip_linux.sh" || { tail -20 "$ENGINE_OUT/build.status"; exit 1; }
 fi
 

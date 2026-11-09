@@ -195,7 +195,7 @@ class OtherSetsAndEntriesAreUnchanged(Base):
             ("cuda", "iq3_s"), ("cuda", "unsloth-ud-iq4_xs-v31"),
             ("hip", "iq3_s"), ("hip", "unsloth-ud-q4_k_xl"), ("hip", "unsloth-ud-iq4_xs"), ("hip", "unsloth-ud-iq4_xs-v31"),
             ("sycl", "iq3_xxs")})
-        self.assertEqual(list(drafting.AUTO_MTP), [("hip", "gfx1201")])
+        self.assertEqual(list(drafting.AUTO_MTP), [("hip", "gfx1201"), ("hip", "gfx906")])
         self.assertEqual(drafting.choice_of("auto", model_name=IQ3S, backend="metal"), "mtp")
         self.assertEqual(drafting.choice_of("auto", model_name=IQ3S, backend="hip", archs=["gfx1201"]), "mtp")
         self.assertEqual(drafting.choice_of("auto", model_name=IQ3S, backend="hip", archs=["gfx1151"]), "dflash2")
