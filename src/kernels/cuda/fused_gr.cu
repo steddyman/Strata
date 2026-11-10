@@ -2897,7 +2897,10 @@ __global__ void __launch_bounds__(THREADS) g906_hc_down_kernel(GrMulti m, float*
                     x.x = fmaf(bb.x, gw[k], x.x); x.y = fmaf(bb.y, gw[k], x.y); x.z = fmaf(bb.z, gw[k], x.z); x.w = fmaf(bb.w, gw[k], x.w);
                 }
                 ss[k] += x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;
-                *reinterpret_cast<float4*>(&xs[k][i]) = make_float4(x.x * g[j].x, x.y * g[j].y, x.z * g[j].z, x.w * g[j].w);
+                // split layout: an 8-value chunk's halves in two planes (plane h at h * N / 2), so the row loop's two
+                // 16-byte reads a lane are contiguous across lanes (bitwise the same sums; T 4 36.8 -> 34.4 us)
+                const int xi = ((i >> 2) & 1) * (N / 2) + (i >> 3) * 4;
+                *reinterpret_cast<float4*>(&xs[k][xi]) = make_float4(x.x * g[j].x, x.y * g[j].y, x.z * g[j].z, x.w * g[j].w);
             }
         }
     }
@@ -2940,9 +2943,9 @@ __global__ void __launch_bounds__(THREADS) g906_hc_down_kernel(GrMulti m, float*
         const bool two = k0 + 1 < T;
 #pragma unroll
         for (int q = 0; q < Q; ++q) {
-            const int e = (lane + 64 * q) * 8;
-            a0 = g9_dot8(w[q], *reinterpret_cast<const float4*>(&xs[k0][e]), *reinterpret_cast<const float4*>(&xs[k0][e + 4]), a0);
-            if (two) a1 = g9_dot8(w[q], *reinterpret_cast<const float4*>(&xs[k0 + 1][e]), *reinterpret_cast<const float4*>(&xs[k0 + 1][e + 4]), a1);
+            const int e = (lane + 64 * q) * 4;            // the chunk's halves in the split layout
+            a0 = g9_dot8(w[q], *reinterpret_cast<const float4*>(&xs[k0][e]), *reinterpret_cast<const float4*>(&xs[k0][N / 2 + e]), a0);
+            if (two) a1 = g9_dot8(w[q], *reinterpret_cast<const float4*>(&xs[k0 + 1][e]), *reinterpret_cast<const float4*>(&xs[k0 + 1][N / 2 + e]), a1);
         }
         a0 = g9_wave_sum(a0);
         if (lane == 63) part[((size_t) k0 * HC + c) * PR + row] = a0;

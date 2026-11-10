@@ -6258,8 +6258,11 @@ template<> struct G9<22> {   // IQ2_S: 4 grid bytes + 2-bit highs (8 weights eac
 
 // NIT > 0: the row has at most NIT calls a lane (n_embd <= NIT * 32 * 32): every weight load of a pass is issued
 // before the first decode, so a pass waits for memory once, not once a call
+#ifndef STRATA_G9_WPE
+#define STRATA_G9_WPE 3
+#endif
 template<int TG, int NIT>
-__global__ void __launch_bounds__(256) g906_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
+__global__ void __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(STRATA_G9_WPE))) g906_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                       const int32_t* __restrict__ grp_start,
                                                       const int32_t* __restrict__ n_groups,
                                                       const int32_t* __restrict__ ent_tok,
@@ -6405,30 +6408,84 @@ __global__ void __launch_bounds__(256) g906_gu_kernel(const unsigned long long* 
 #endif
 
 #if defined(STRATA_HIP_GFX906)
-// ---- 9 (gfx906) down, IQ4_NL: a row of n_ff = 640 inputs is 20 blocks; mode 7/8's kernel gave it 32 lanes of
-// half-block calls (40 calls: the second pass 8 of 32 lanes busy).  Here 4 lanes a row take 5 whole blocks each - one
-// 16-byte qs load, 8 table lookups once for the chunk's tokens, 8 dp4a a token - and a quad sum (DPP).  64 rows a
-// block as before (16 a wavefront).  The float sums run in another order than mode 8's (rounding-level), the same
+// ---- 9 (gfx906) down, IQ4_NL and Q2_0: a row of n_ff = 640 inputs is 20 IQ4_NL / 10 Q2_0 blocks; mode 7/8's kernel gave it 32 lanes of
+// half-block calls (40 IQ4_NL calls: the second pass 8 of 32 lanes busy).  Here a row's lanes (4 / 2) take 5 whole
+// blocks each, decoded once for the chunk's tokens, then summed across the row's lanes (DPP).  The float sums run in another order than mode 8's (rounding-level), the same
 // for every window size.  STRATA_G906_DOWN=0 keeps the mode 7/8 kernel.
 typedef int g9_v4 __attribute__((ext_vector_type(4), aligned(2)));
 typedef int g9_v4a __attribute__((ext_vector_type(4), aligned(4)));
-__global__ void __launch_bounds__(256) g906_down_nl_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                           const int32_t* __restrict__ grp_start,
-                                                           const int32_t* __restrict__ n_groups,
-                                                           const int32_t* __restrict__ ent_dst,
-                                                           const block_q8_1* __restrict__ hq, NativeExpertLayout L,
-                                                           float* __restrict__ out) {
-    constexpr int LPR = 4;
+// the format's whole block: its weights as 8 or 16 signed-byte words (decode, once for every token) and its dot with
+// one token's activations (the block's q8_1 blocks in LDS)
+template<int TD> struct G9D;
+template<> struct G9D<20> {   // IQ4_NL: 32 values, one q8_1 block; 4 lanes x 5 blocks a 640-row
+    static constexpr int QK = 32, LPR = 4, NW = 8;
+    using B = block_iq4_nl;
+    struct W { int v[NW]; float d; };
+    __device__ static __forceinline__ void decode(const B* b, W& w) {
+        const g9_v4 q = *(const g9_v4*) b->qs;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { const int2 t = get_int_from_table_16(q[i], kvalues_iq4nl); w.v[i] = t.x; w.v[4 + i] = t.y; }
+        w.d = __half2float(b->d);
+    }
+    __device__ static __forceinline__ float dot(const W& w, const block_q8_1* xb) {
+        const g9_v4a u0 = *(const g9_v4a*) xb->qs, u1 = *(const g9_v4a*) (xb->qs + 16);
+        int sumi = 0;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) { sumi = ggml_cuda_dp4a(w.v[i], u0[i], sumi); sumi = ggml_cuda_dp4a(w.v[4 + i], u1[i], sumi); }
+        return (w.d * __low2float(xb->ds)) * (float) sumi;
+    }
+};
+template<> struct G9D<42> {   // Q2_0: 64 values, two q8_1 blocks; 2 lanes x 5 blocks a 640-row; vec_dot_q2_0_q8_1's decode
+    static constexpr int QK = 64, LPR = 2, NW = 16;
+    using B = block_q2_0;
+    struct W { int v[NW]; float d; };
+    __device__ static __forceinline__ void decode(const B* b, W& w) {
+        const int16_t* qs = (const int16_t*) b->qs;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const int q = qs[j];
+            const int qe = __byte_perm(0x020100FF, 0x020100FF, q >> 0);
+            const int qo = __byte_perm(0x020100FF, 0x020100FF, q >> 2);
+            w.v[2 * j] = __byte_perm(qe, qo, 0x5140);
+            w.v[2 * j + 1] = __byte_perm(qe, qo, 0x7362);
+        }
+        w.d = b->d;
+    }
+    __device__ static __forceinline__ float dot(const W& w, const block_q8_1* xb) {
+        float r = 0.0f;
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {   // the block's two q8_1 blocks (vec_dot_q2_0_q8_1's iqs 0 and 1)
+            const int* u = (const int*) xb[h].qs;
+            int sumi = 0;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                sumi = ggml_cuda_dp4a(u[2 * j], w.v[8 * h + 2 * j], sumi);
+                sumi = ggml_cuda_dp4a(u[2 * j + 1], w.v[8 * h + 2 * j + 1], sumi);
+            }
+            r += w.d * __low2float(xb[h].ds) * (float) sumi;
+        }
+        return r;
+    }
+};
+template<int TD>
+__global__ void __launch_bounds__(256) g906_down_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                        const int32_t* __restrict__ grp_start,
+                                                        const int32_t* __restrict__ n_groups,
+                                                        const int32_t* __restrict__ ent_dst,
+                                                        const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                        float* __restrict__ out) {
+    using D = G9D<TD>;
+    constexpr int LPR = D::LPR, RPB = 256 / LPR;   // rows a block: 64 (IQ4_NL), 128 (Q2_0)
     extern __shared__ int sh_raw[];   // LDS_NT entries x hb blocks of q8_1
     const int g = blockIdx.y;
     if (g >= *n_groups) return;
     const int tid = threadIdx.x, lane = tid % LPR;
     const uint8_t* blob = (const uint8_t*) grp_ptr[g];
-    const int nb = (int) (L.n_ff / 32), hb = nb;
+    const int nb = (int) (L.n_ff / D::QK), hb = (int) (L.n_ff / 32), qpb = D::QK / 32;
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    const int r = blockIdx.x * LDS_RB + tid / LPR;
+    const int r = blockIdx.x * RPB + tid / LPR;
     const bool live = r < (int) L.n_embd;
-    const block_iq4_nl* wr = (const block_iq4_nl*) (blob + L.down_off + (size_t) (live ? r : 0) * L.d_row);
+    const typename D::B* wr = (const typename D::B*) (blob + L.down_off + (size_t) (live ? r : 0) * L.d_row);
     const block_q8_1* sh = (const block_q8_1*) sh_raw;
     for (int c0 = e0; c0 < e1; c0 += LDS_NT) {
         const int cn = min(LDS_NT, e1 - c0);
@@ -6444,31 +6501,16 @@ __global__ void __launch_bounds__(256) g906_down_nl_kernel(const unsigned long l
 #pragma unroll
             for (int j = 0; j < NTC; ++j) acc[j] = 0.0f;
             for (int kb = lane; live && kb < nb; kb += LPR) {
-                const block_iq4_nl* b = wr + kb;
-                const g9_v4 q = *(const g9_v4*) b->qs;
-                const float dw = __half2float(b->d);
-                int2 v[4];
+                typename D::W w;
+                D::decode(wr + kb, w);
 #pragma unroll
-                for (int i = 0; i < 4; ++i) v[i] = get_int_from_table_16(q[i], kvalues_iq4nl);
-#pragma unroll
-                for (int j = 0; j < NTC; ++j) {
-                    const block_q8_1* xb = sh + (size_t) j * hb + kb;
-                    const g9_v4a u0 = *(const g9_v4a*) xb->qs;
-                    const g9_v4a u1 = *(const g9_v4a*) (xb->qs + 16);
-                    int sumi = 0;
-#pragma unroll
-                    for (int i = 0; i < 4; ++i) {
-                        sumi = ggml_cuda_dp4a(v[i].x, u0[i], sumi);
-                        sumi = ggml_cuda_dp4a(v[i].y, u1[i], sumi);
-                    }
-                    acc[j] += (dw * __low2float(xb->ds)) * (float) sumi;
-                }
+                for (int j = 0; j < NTC; ++j) acc[j] += D::dot(w, sh + (size_t) j * hb + kb * qpb);
             }
 #pragma unroll
             for (int j = 0; j < NTC; ++j) {
                 float a = acc[j];
-                a += __shfl_xor(a, 1, 64);
-                a += __shfl_xor(a, 2, 64);
+#pragma unroll
+                for (int o = 1; o < LPR; o <<= 1) a += __shfl_xor(a, o, 64);
                 if (live && lane == 0) out[(size_t) ent_dst[c0 + j] * L.n_embd + r] = a;
             }
         };
@@ -6859,7 +6901,9 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #if defined(STRATA_HIP_GFX906)
         static const bool g9d = [] { const char* v = std::getenv("STRATA_G906_DOWN"); return !(v && v[0] == '0'); }();
         if (em0d == 9 && g9d && L.d_type == 20 && L.n_ff % 32 == 0)
-            g906_down_nl_kernel<<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            g906_down_kernel<20><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+        else if (em0d == 9 && g9d && L.d_type == 42 && L.n_ff % 64 == 0)   // 128 rows a block
+            g906_down_kernel<42><<<dim3((unsigned) ((L.n_embd + 127) / 128), (unsigned) cap_groups), 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
         else
 #endif
         if (L.d_type == 20) native_down_lds_kernel<20><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
