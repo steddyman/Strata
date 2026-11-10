@@ -47,13 +47,37 @@ explains it: the time is spread over about 35 launches per layer, most of them w
 | + gfx906 defaults table (exact in the gate) | 48.4 | | 100.00 %, KL 0 |
 | + Q6_K kernel and DPP row sums (rounding order) | 44.7 | 43–45 tok/s | 95.04 %, KL 0.0228, PPL 4.031 (control: 94.85 %, 0.0242, 4.103) |
 | + two-kernel hyper-connection read (no norm launch) | 41.7 | ~46 tok/s | |
-| + Q4_K and IQ4_XS kernels, IQ3_XXS sign unpack | **41.2** | **46.5 tok/s** | 95.20 %, KL 0.0216, PPL 4.094 (0.1.59.8) |
+| + Q4_K and IQ4_XS kernels, IQ3_XXS sign unpack | 41.2 | 46.5 tok/s | 95.20 %, KL 0.0216, PPL 4.094 (0.1.59.8) |
+| + expert mode 9, one-token router via the rows kernel, QSA merge v2 (all bitwise) | 39.7 | 48.9 tok/s | bitwise 0.1.59.8 (0.1.59.9) |
+| + lane-group GEMV rows, Q5_K kernel | **37.3** | **50.9 tok/s** | 94.87 %, KL 0.0239, PPL 4.107 (0.1.59.10) |
 
 What did not pay: LDS staging alone on the CUDA-shaped kernels (the weight loads, not the activations, bound
 them), more rows per wavefront, a software prefetch that doubled the registers (two waves a SIMD), the existing
 `STRATA_GR_V3` read (it needs 80 KB of LDS; gfx906 has 64 KB), dword loads in `get_int_b2` (the expert gate/up is
 ALU-bound: VALU 63 %, memory 35 %). Pitfalls met: indexing a register vector's bytes (`&hdr`) put it in scratch
 (Q4_K 35 -> 54 us until fixed); a kernel chosen by column count breaks verify's per-column exactness.
+
+Round 2 (0.1.59.9-10), from a fresh trace grouped by kind (dense GEMV 26 %, experts 18 %, hyper-connections 11.5 %,
+router 8 %, sync 6.5 %, attention 5 %):
+
+- Expert gate/up, mode 9 (`g906_gu_kernel`): each signed grid word built once, `(g ^ m) + b` with the sign masks from
+  `v_mul_u32_u24` + `v_perm_b32` (mode 8 used a quarter-rate `v_mul_lo_u32` and a correction dot a token).  Bitwise
+  mode 8.  What did not pay: a sign table in LDS (random 16-byte reads conflict), double-buffered passes (151 VGPRs).
+  The expert kernels stay at ~260 GB/s: latency-bound at 3 waves a SIMD, VALU ~50 % (a plain read of the same
+  98-byte blocks runs at 700 GB/s, so the access pattern is not the limit).
+- The router's one-token BF16 GEMV launched 512 one-row blocks; on this card that shape hits a ~70 us stall (a bare
+  read kernel shows it too, at some grid sizes).  The rows kernel (4 rows a block, bitwise) takes 14 us.
+- The drafter's QSA merge walked all 512 chunks of `--mtp-window` (243 us); `STRATA_ATTN_MERGE_V2` (bitwise,
+  `qsa_merge_daily_parity` 1172 cases on gfx906) stops at the live width.
+- Dense kernels: LPR lanes a row chosen from n_in (2560 inputs = 40 lane tasks: 8 lanes x 5, not 40 of 64), used
+  where >= 128 blocks remain; a Q5_K kernel.  The 640-row shared-expert matrices are launch/latency-bound (~8-15 us
+  isolated); in the trace they read 40-80 us because they share the GPU with the experts' stream.
+
+**Clock note**: `/etc/udev/rules.d/30-amdgpu-pm.rules` sets `power_dpm_force_performance_level=low` on both cards,
+which pins the shader clock at 999 MHz (the card boosts to 1730 MHz).  All numbers here are at that setting.
+
+Still to do: Q6_K / Q4_K with 6144 inputs (`ssm_out`, `attn_output`: wave kernel, 166 GB/s at T 4), the experts'
+occupancy (VGPRs 76-97), the hyper-connection kernels' scaling with T, the LM head at T > 1.
 
 Next, by the trace (rocprofv3 --kernel-trace on a live serve; the engine must get SIGINT itself to write it):
 expert gate/up and down (~4 s of 26 s traced, ALU-bound grid lookups), QSA `attn_merge` (87 us on 24 blocks),
