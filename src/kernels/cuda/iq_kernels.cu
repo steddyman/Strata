@@ -44,16 +44,27 @@ void check(const char* what) {
 
 // ---------------------------------------------------------------- llama.cpp helpers (vecdotq.cuh)
 __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
+#if defined(STRATA_HIP_GFX906)
+    // gfx906 loads a dword from a 2-byte aligned address: one load instead of two 16-bit ones, the same bytes
+    typedef int __attribute__((aligned(2))) strata_int_a2;
+    return ((const strata_int_a2*) x)[i32];
+#else
     const uint16_t* x16 = (const uint16_t*) x;
     int x32 = x16[2 * i32 + 0] << 0;
     x32 |= x16[2 * i32 + 1] << 16;
     return x32;
+#endif
 }
 __device__ __forceinline__ int get_int_b4(const void* x, const int& i32) { return ((const int*) x)[i32]; }
 __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
     const uint32_t p = __popc(v) & 1;
     const uint32_t s = v ^ p << 7;
     return s * 0x01010101;
+}
+// The low byte of unpack_ksigns only (what nib_mask reads): no quarter-rate v_mul_lo_u32 on gfx906.
+__device__ __forceinline__ uint32_t unpack_ksigns_lo(const uint8_t v) {
+    const uint32_t p = __popc(v) & 1;
+    return v ^ p << 7;
 }
 __device__ __forceinline__ int2 get_int_from_table_16(const int& q4, const int8_t* table) {
 #if defined(STRATA_HIP_GFX906)
@@ -5799,7 +5810,7 @@ template<int SG> struct DotG<18, SG> { __device__ static __forceinline__ float f
 #pragma unroll
     for (int l0 = 0; l0 < 8; l0 += 2) {
         const int2 grid_pos = make_int2(grid[q3[l0 + 0]], grid[q3[l0 + 1]]);
-        const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
+        const uint32_t signs = SG == 1 ? unpack_ksigns_lo(aux32 >> (7 * l0 / 2)) : unpack_ksigns(aux32 >> (7 * l0 / 2));
         const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
         if constexpr (SG == 1) {
