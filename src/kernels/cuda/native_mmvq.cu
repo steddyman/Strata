@@ -2435,12 +2435,14 @@ __device__ __forceinline__ float g906_group_sum_dpp(float v) {
     if constexpr (LPR >= 64) v += g906_dpp<0x143, 0xc>(v);
     return v;
 }
-// lanes a row for the gfx906 lane-group kernels, from the row's task count alone: every lane busy where possible
-// (40 tasks: 8 lanes x 5), the widest such group; STRATA_G906_LPR forces one (the bench)
+// lanes a row for the gfx906 lane-group kernels, from the row's task count alone; STRATA_G906_LPR forces one (the bench)
 inline int g906_lpr(int ntask) {
     static const int env = [] { const char* e = std::getenv("STRATA_G906_LPR"); return e ? std::atoi(e) : 0; }();
     if (env == 8 || env == 16 || env == 32 || env == 64) return env;
-    for (int l : {64, 32, 16}) if (ntask % l == 0) return l;
+    // the widest group that divides the tasks and still gives each lane >= 4 (2560 inputs, 40 tasks: 8 x 5; 6144, 96
+    // tasks: 16 x 6 - 32 x 3 lost at T 3-4 in mmvq_bench, 6144 x 2560 Q6_K T 1-4 28.8/35.9/45.0/52.8 us on the wave
+    // kernel -> 27.7/29.4/36.0/48.6 at 16 lanes)
+    for (int l : {64, 32, 16}) if (ntask % l == 0 && ntask / l >= 4) return l;
     return 8;
 }
 // The lane-group launch of a gfx906 GEMV kernel (LPR from n_in alone, g906_lpr; LPR-row groups, rows a block doubled
@@ -2448,6 +2450,11 @@ inline int g906_lpr(int ntask) {
 // >= 128 blocks (mmvq_bench, T 1-4: Q6_K 10240 x 2560 46/92 -> 44/67 us, Q4_K 6144 x 2560 24/47 -> 19/31, IQ4_XS
 // 12288 x 2560 53/91 -> 44/58, Q5_K 10240 x 2560 43/80 -> 36/52; the 640-row shared-expert matrices, 20 blocks, were
 // slower: 8 -> 13 us).  STRATA_G906_LG=0 never, 1 always.
+// STRATA_G906_WIDE=0: rows of 4097..6144 inputs keep the wave kernel
+inline bool g906_wide() {
+    static const bool on = [] { const char* e = std::getenv("STRATA_G906_WIDE"); return !(e && e[0] == '0'); }();
+    return on;
+}
 inline bool g906_lg(int n_in, int n_out) {
     static const int env = [] { const char* e = std::getenv("STRATA_G906_LG"); return e ? std::atoi(e) : -1; }();
     if (env >= 0) return env != 0;
@@ -2865,7 +2872,10 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
         const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
         // by shape only, never by column count (a column's sums must not depend on how many columns ride along): past 4096
         // inputs the wave kernel is as fast on average (it wins at T >= 3, this one at T <= 2)
-        if (g_g906_q6k && lds <= 49152 && n_in <= 4096) {
+        // up to 6144 inputs (ssm_out / attn_output) where the widest window's activations fit LDS: decided by shape
+        // alone (the lds of STRATA_VERIFY_MAX_T columns), never by this call's column count
+        const std::size_t lds_max = std::size_t(STRATA_VERIFY_MAX_T) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
+        if (g_g906_q6k && ((lds <= 49152 && n_in <= 4096) || (g906_wide() && n_in <= 6144 && lds_max <= 65536))) {
             static const int rpb_env = [] { const char* e = std::getenv("STRATA_G906_RPB"); return e ? std::atoi(e) : 0; }();
             if (g906_lg(n_in, n_out)) { g906_lg_launch<NCOLS>(G906LG<Q6KBlock>{g906_q6k_kernel<NCOLS, 8>, g906_q6k_kernel<NCOLS, 16>, g906_q6k_kernel<NCOLS, 32>, g906_q6k_kernel<NCOLS, 64>}, w, x, y, n_in, n_out, lds, s); return; }
             int rpb = rpb_env > 0 ? rpb_env : (n_out / 256) & ~3;
@@ -2877,7 +2887,8 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
     if constexpr (std::is_same_v<F, Q4KTraits>) {
         // shape only (never the column count): rows of up to 4096 inputs, so every column count fits LDS
         const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
-        if (g_g906_q4k && n_in <= 4096 && lds <= 65536) {
+        const std::size_t lds_max = std::size_t(STRATA_VERIFY_MAX_T) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
+        if (g_g906_q4k && ((n_in <= 4096 && lds <= 65536) || (g906_wide() && n_in <= 6144 && lds_max <= 65536))) {
             if (g906_lg(n_in, n_out)) { g906_lg_launch<NCOLS>(G906LG<Q4KBlock>{g906_q4k_kernel<NCOLS, 8>, g906_q4k_kernel<NCOLS, 16>, g906_q4k_kernel<NCOLS, 32>, g906_q4k_kernel<NCOLS, 64>}, w, x, y, n_in, n_out, lds, s); return; }
             static const int rpb4_env = [] { const char* e = std::getenv("STRATA_G906_Q4K_RPB"); return e ? std::atoi(e) : 0; }();
             int rpb = rpb4_env > 0 ? rpb4_env : (n_out / 256) & ~3;
@@ -2888,7 +2899,8 @@ void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, 
     }
     if constexpr (std::is_same_v<F, Q5KTraits>) {   // shape only, as Q4_K
         const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
-        if (g_g906_q5k && n_in <= 4096 && lds <= 65536) {
+        const std::size_t lds_max = std::size_t(STRATA_VERIFY_MAX_T) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
+        if (g_g906_q5k && ((n_in <= 4096 && lds <= 65536) || (g906_wide() && n_in <= 6144 && lds_max <= 65536))) {
             if (g906_lg(n_in, n_out)) { g906_lg_launch<NCOLS>(G906LG<Q5KBlock>{g906_q5k_kernel<NCOLS, 8>, g906_q5k_kernel<NCOLS, 16>, g906_q5k_kernel<NCOLS, 32>, g906_q5k_kernel<NCOLS, 64>}, w, x, y, n_in, n_out, lds, s); return; }
             int rpb = (n_out / 256) & ~3;
             rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;

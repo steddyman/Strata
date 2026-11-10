@@ -6404,6 +6404,84 @@ __global__ void __launch_bounds__(256) g906_gu_kernel(const unsigned long long* 
 }
 #endif
 
+#if defined(STRATA_HIP_GFX906)
+// ---- 9 (gfx906) down, IQ4_NL: a row of n_ff = 640 inputs is 20 blocks; mode 7/8's kernel gave it 32 lanes of
+// half-block calls (40 calls: the second pass 8 of 32 lanes busy).  Here 4 lanes a row take 5 whole blocks each - one
+// 16-byte qs load, 8 table lookups once for the chunk's tokens, 8 dp4a a token - and a quad sum (DPP).  64 rows a
+// block as before (16 a wavefront).  The float sums run in another order than mode 8's (rounding-level), the same
+// for every window size.  STRATA_G906_DOWN=0 keeps the mode 7/8 kernel.
+typedef int g9_v4 __attribute__((ext_vector_type(4), aligned(2)));
+typedef int g9_v4a __attribute__((ext_vector_type(4), aligned(4)));
+__global__ void __launch_bounds__(256) g906_down_nl_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                           const int32_t* __restrict__ grp_start,
+                                                           const int32_t* __restrict__ n_groups,
+                                                           const int32_t* __restrict__ ent_dst,
+                                                           const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                           float* __restrict__ out) {
+    constexpr int LPR = 4;
+    extern __shared__ int sh_raw[];   // LDS_NT entries x hb blocks of q8_1
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int tid = threadIdx.x, lane = tid % LPR;
+    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const int nb = (int) (L.n_ff / 32), hb = nb;
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const int r = blockIdx.x * LDS_RB + tid / LPR;
+    const bool live = r < (int) L.n_embd;
+    const block_iq4_nl* wr = (const block_iq4_nl*) (blob + L.down_off + (size_t) (live ? r : 0) * L.d_row);
+    const block_q8_1* sh = (const block_q8_1*) sh_raw;
+    for (int c0 = e0; c0 < e1; c0 += LDS_NT) {
+        const int cn = min(LDS_NT, e1 - c0);
+        __syncthreads();
+        {
+            const int* src = (const int*) (hq + (size_t) c0 * hb);
+            for (int i = tid; i < cn * hb * 9; i += 256) sh_raw[i] = src[i];
+        }
+        __syncthreads();
+        auto pass = [&](auto ntc) {
+            constexpr int NTC = decltype(ntc)::value;
+            float acc[NTC];
+#pragma unroll
+            for (int j = 0; j < NTC; ++j) acc[j] = 0.0f;
+            for (int kb = lane; live && kb < nb; kb += LPR) {
+                const block_iq4_nl* b = wr + kb;
+                const g9_v4 q = *(const g9_v4*) b->qs;
+                const float dw = __half2float(b->d);
+                int2 v[4];
+#pragma unroll
+                for (int i = 0; i < 4; ++i) v[i] = get_int_from_table_16(q[i], kvalues_iq4nl);
+#pragma unroll
+                for (int j = 0; j < NTC; ++j) {
+                    const block_q8_1* xb = sh + (size_t) j * hb + kb;
+                    const g9_v4a u0 = *(const g9_v4a*) xb->qs;
+                    const g9_v4a u1 = *(const g9_v4a*) (xb->qs + 16);
+                    int sumi = 0;
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        sumi = ggml_cuda_dp4a(v[i].x, u0[i], sumi);
+                        sumi = ggml_cuda_dp4a(v[i].y, u1[i], sumi);
+                    }
+                    acc[j] += (dw * __low2float(xb->ds)) * (float) sumi;
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < NTC; ++j) {
+                float a = acc[j];
+                a += __shfl_xor(a, 1, 64);
+                a += __shfl_xor(a, 2, 64);
+                if (live && lane == 0) out[(size_t) ent_dst[c0 + j] * L.n_embd + r] = a;
+            }
+        };
+        switch (cn) {
+            case 1: pass(std::integral_constant<int, 1>{}); break;
+            case 2: pass(std::integral_constant<int, 2>{}); break;
+            case 3: pass(std::integral_constant<int, 3>{}); break;
+            default: pass(std::integral_constant<int, 4>{}); break;
+        }
+    }
+}
+#endif
+
 // dflash2-kern: Strix Halo (gfx1151) takes mode 8 (gate/up + SwiGLU + q8_1 in one launch, the group's activations in LDS) for the
 // IQ packs' gate/up: native_expert_bench on the IQ3_S pack's real rows, 45 groups of one entry (a 8-token verify window's call),
 // gate/up -25% (IQ2_S), -8% (IQ3_XXS), -6% (IQ3_S), bitwise equal to mode 0.  STRATA_GFX1151_EXP8=0 keeps the old layout.
@@ -6778,6 +6856,12 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     if ((em0d == 7 || em0d == 8 || em0d == 9) && lds_down_ok) {
         const dim3 gl((unsigned) ((L.n_embd + LDS_RB - 1) / LDS_RB), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_ff / 32) * sizeof(block_q8_1);
+#if defined(STRATA_HIP_GFX906)
+        static const bool g9d = [] { const char* v = std::getenv("STRATA_G906_DOWN"); return !(v && v[0] == '0'); }();
+        if (em0d == 9 && g9d && L.d_type == 20 && L.n_ff % 32 == 0)
+            g906_down_nl_kernel<<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+        else
+#endif
         if (L.d_type == 20) native_down_lds_kernel<20><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
         else native_down_lds_kernel<42><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
         check("native_expert_grouped/down");
