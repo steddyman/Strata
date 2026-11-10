@@ -7189,6 +7189,16 @@ int main(int argc, char** argv) {
         if (!o.mtp.empty()) mtp.set_prompt_len((int64_t) o.tokens.size());
         if (!o.mtp.empty()) {
         mtp.set_hnorm_per_stream(o.mtp_hnorm_stream);   // --mtp-hnorm stream (opt-in), before any capture
+#if defined(STRATA_HIP_GFX906)
+        // gfx906: the MTP's draft head as IQ4_XS by default (--mtp-q4 head; MtpDrafter::make_q4_head): the 106K-row head
+        // 344 -> 220 us a draft step, the same tokens a window (1.919 vs 1.924 over ~2050 windows), 25.81 -> 25.50 ms a
+        // window.  Only the drafts change.  Not with DFlash2 (it may share the head); a --mtp-q4 given wins;
+        // STRATA_GFX906_MTP_HEAD4=0 keeps the main head's format.
+        if (o.mtp_q4.empty() && o.draft != "dflash2") {
+            const char* e = std::getenv("STRATA_GFX906_MTP_HEAD4");
+            if (!(e != nullptr && e[0] == '0')) o.mtp_q4 = "head";
+        }
+#endif
         mtp.set_q4(o.mtp_q4 == "all" || o.mtp_q4 == "proj", o.mtp_q4 == "all" || o.mtp_q4 == "head");   // before load
         if (!o.mtp_draft_vocab.empty()) mtp.set_draft_vocab(o.mtp_draft_vocab);
         }
