@@ -1,5 +1,5 @@
 import sys, numpy as np
-cases=[("GDN qkv",10240),("GDN out",2560),("GDN z",6144),("QSA out",2560),("QSA q",12288),("shexp dn",2560),("shexp gate",640)]
+cases=[("GDN qkv",10240),("GDN out",2560),("GDN z",6144),("QSA out",2560),("QSA q",12288),("shexp dn",2560),("shexp gate",640),("GDN qkv5",10240),("shexp q6",640),("shexp xs",640)]
 a=np.fromfile(sys.argv[1],np.float32); b=np.fromfile(sys.argv[2],np.float32); o=0
 for name,n in cases:
     cols={}
