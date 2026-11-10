@@ -3763,6 +3763,9 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+#if defined(STRATA_HIP_GFX906)
+    if (g906_dense9(42, weights, std::size_t(n_in / 64) * sizeof(Q20Block), x_q8_1, y, n_in, n_out, ncols, stream)) return;
+#endif
     STRATA_WAVE_MMVQ(Q20Traits)
 #if !defined(__HIPCC__)
     // one column always (bitwise the single-column kernel); two to four only where the exact layout is the one in use
@@ -3821,6 +3824,9 @@ void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+#if defined(STRATA_HIP_GFX906)
+    if (g906_dense9(11, weights, std::size_t(n_in / 256) * sizeof(Q3KBlock), x_q8_1, y, n_in, n_out, ncols, stream)) return;
+#endif
     STRATA_WAVE_MMVQ(Q3KTraits)
     if (ncols > 1) {
         launch_multi<Q3KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);

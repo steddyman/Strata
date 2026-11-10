@@ -5381,6 +5381,7 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
     cudaStream_t s = (cudaStream_t) stream;
     const auto* W = (const uint8_t*) w;
     const auto* X = (const block_q8_1*) x_q8_1;
+    if (g906_dense9(t, w, rb, x_q8_1, y, n_in, n_out, ncols, stream)) return;
     switch (t) {
 #define STRATA_MMVQ(T) case T: launch_mmvq<T>(W, rb, X, y, n_in, n_out, ncols, s); break;
         STRATA_MMVQ_FMTS(STRATA_MMVQ)
@@ -5751,8 +5752,20 @@ __global__ void __launch_bounds__(256) native_down_amd_kernel(const unsigned lon
 // memory path after the weight load.  Same calls, same lane-strided k, same R2 row pairs, same warp_sum: the
 // output is bitwise the mode-2 one.
 template<int TY> struct GridOf;
+// mode 9's IQ2_XXS / IQ2_XS gate/up kernels (gfx906; STRATA_G906_IQ2=0 keeps the R2 fallback)
+inline bool g906_iq2() {
+#if defined(STRATA_HIP_GFX906)
+    static const bool on = [] { const char* v = std::getenv("STRATA_G906_IQ2"); return !(v && v[0] == '0'); }();
+    return on;
+#else
+    return false;
+#endif
+}
 template<> struct GridOf<22> { using T = uint64_t; static constexpr int N = 1024; __device__ static const T* src() { return iq2s_grid; } };
 template<> struct GridOf<16> { using T = uint64_t; static constexpr int N = 256; __device__ static const T* src() { return iq2xxs_grid; } };
+template<> struct GridOf<17> { using T = uint64_t; static constexpr int N = 512; __device__ static const T* src() { return iq2xs_grid; } };
+template<> struct GridOf<29> { using T = uint32_t; static constexpr int N = 2048; __device__ static const T* src() { return iq1s_grid_gpu; } };
+template<> struct GridOf<42> { using T = uint32_t; static constexpr int N = 1; __device__ static const T* src() { return iq3s_grid; } };   // Q2_0: no grid
 template<> struct GridOf<18> { using T = uint32_t; static constexpr int N = 256; __device__ static const T* src() { return iq3xxs_grid; } };
 template<> struct GridOf<21> { using T = uint32_t; static constexpr int N = 512; __device__ static const T* src() { return iq3s_grid; } };
 template<> struct GridOf<23> { using T = uint32_t; static constexpr int N = 1; __device__ static const T* src() { return iq3s_grid; } };   // IQ4_XS: no grid
@@ -6256,6 +6269,118 @@ template<> struct G9<22> {   // IQ2_S: 4 grid bytes + 2-bit highs (8 weights eac
     }
 };
 
+template<> struct G9<16> {   // IQ2_XXS: 4 grid bytes (8 weights each), 4 x 7 sign bits + a 4-bit scale a call
+    static constexpr int BS = (int) sizeof(block_iq2_xxs);
+    struct Raw { g9_i2 q; half d; };
+    struct Sc { float d; int ls; };
+    __device__ static __forceinline__ void load(const uint8_t* b, int iqs, Raw& r) {
+        const block_iq2_xxs* bq = (const block_iq2_xxs*) b;
+        r.q = *(const g9_i2*) ((const uint8_t*) bq->qs + 4 * iqs);
+        r.d = bq->d;
+    }
+    __device__ static __forceinline__ void decode(const Raw& r, const uint64_t* grid, int (&W)[8], Sc& sc, int) {
+        const uint32_t qw = (uint32_t) r.q.x, aux = (uint32_t) r.q.y;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint2 gg = *(const uint2*) (grid + ((qw >> (8 * l)) & 0xFFu));
+            const uint32_t v = (aux >> (7 * l)) & 0x7Fu, sb = v | ((__popc(v) & 1u) << 7);
+            W[2 * l + 0] = g9_swn(gg.x, sb & 0xFu);
+            W[2 * l + 1] = g9_swn(gg.y, sb >> 4);
+        }
+        sc.d = __half2float(r.d);
+        sc.ls = (int) ((aux >> 27) | 1u);
+    }
+    __device__ static __forceinline__ int finish(int lo, int hi, const Sc& sc) {
+        return __mul24(lo + hi, sc.ls) / 8;   // |sumi| < 2^18, ls < 32: exact in 24 bits
+    }
+};
+template<> struct G9<17> {   // IQ2_XS: 4 x (9-bit grid index + 7 sign bits), two 4-bit scales a call
+    static constexpr int BS = (int) sizeof(block_iq2_xs);
+    struct Raw { g9_i2 q; uint8_t sc; half d; };
+    struct Sc { float d; int ls0, ls1; };
+    __device__ static __forceinline__ void load(const uint8_t* b, int iqs, Raw& r) {
+        const block_iq2_xs* bq = (const block_iq2_xs*) b;
+        r.q = *(const g9_i2*) ((const uint8_t*) bq->qs + 4 * iqs);
+        r.sc = bq->scales[iqs / 2];
+        r.d = bq->d;
+    }
+    __device__ static __forceinline__ void decode(const Raw& r, const uint64_t* grid, int (&W)[8], Sc& sc, int) {
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint32_t q = ((uint32_t) (l < 2 ? r.q.x : r.q.y) >> (16 * (l & 1))) & 0xFFFFu;
+            const uint2 gg = *(const uint2*) (grid + (q & 0x1FFu));
+            const uint32_t v = q >> 9, sb = v | ((__popc(v) & 1u) << 7);
+            W[2 * l + 0] = g9_swn(gg.x, sb & 0xFu);
+            W[2 * l + 1] = g9_swn(gg.y, sb >> 4);
+        }
+        sc.d = __half2float(r.d);
+        sc.ls0 = r.sc & 0x0F;
+        sc.ls1 = r.sc >> 4;
+    }
+    __device__ static __forceinline__ int finish(int lo, int hi, const Sc& sc) {
+        return (__mul24(lo, sc.ls0) + __mul24(hi, sc.ls1) + (lo + hi) / 2) / 4;
+    }
+};
+
+template<> struct G9<42> {   // Q2_0: 4 blocks of 64 as a 256-weight super block; a call is half a block (32 weights, 8 bytes)
+    static constexpr int BS = 4 * (int) sizeof(block_q2_0);
+    struct Raw { g9_i2 q; half d; };
+    struct Sc { float d; };
+    __device__ static __forceinline__ void load(const uint8_t* b, int iqs, Raw& r) {
+        const block_q2_0* bq = (const block_q2_0*) b + iqs / 4;
+        r.q = *(const g9_i2*) ((const uint8_t*) bq->qs + 8 * ((iqs / 2) & 1));
+        r.d = bq->d;
+    }
+    __device__ static __forceinline__ void decode(const Raw& r, const uint32_t*, int (&W)[8], Sc& sc, int) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {   // G9D<42>'s decode: 2-bit codes 0..3 -> -1, 0, 1, 2
+            const int q = (int) (int16_t) (((uint32_t) (j < 2 ? r.q.x : r.q.y)) >> (16 * (j & 1)));
+            const int qe = __byte_perm(0x020100FF, 0x020100FF, q >> 0);
+            const int qo = __byte_perm(0x020100FF, 0x020100FF, q >> 2);
+            W[2 * j] = __byte_perm(qe, qo, 0x5140);
+            W[2 * j + 1] = __byte_perm(qe, qo, 0x7362);
+        }
+        sc.d = __half2float(r.d);
+    }
+    __device__ static __forceinline__ int finish(int lo, int hi, const Sc&) { return lo + hi; }
+};
+
+template<> struct G9<29> {   // IQ1_M: 4 grid bytes + 3-bit highs, a delta bit per 8 weights, two 3-bit scales a call
+    // The reference adds delta * sum(u) in floats (delta = -1 +- 1/8).  Times 8, every weight is an integer:
+    // 8 g - 8 +- 1 with g in 0..2, so {-7, 1, 9} or {-9, -1, 7}; v_perm_b32 picks them from a 3-byte table with the
+    // grid nibbles as selectors, and the 1/8 goes into the float scale (exact).  Rounding-level vs the reference.
+    static constexpr int BS = (int) sizeof(block_iq1_m);
+    struct Raw { uint32_t qs; uint32_t qh; uint2 sc; };
+    struct Sc { float d; int s0, s1; };
+    __device__ static __forceinline__ void load(const uint8_t* b, int iqs, Raw& r) {
+        const block_iq1_m* bq = (const block_iq1_m*) b;
+        const int c = iqs / 2;
+        r.qs = *(const uint32_t*) (bq->qs + 4 * c);
+        r.qh = *(const uint16_t*) (bq->qh + 2 * c);
+        r.sc = *(const uint2*) bq->scales;
+    }
+    __device__ static __forceinline__ void decode(const Raw& r, const uint32_t* grid, int (&W)[8], Sc& sc, int iqs) {
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint32_t qhl = (r.qh >> (4 * l)) & 0xFu;
+            const uint32_t gv = grid[((r.qs >> (8 * l)) & 0xFFu) | ((qhl & 0x07u) << 8)];
+            const uint32_t lut = (qhl & 0x08u) ? 0x0007FFF7u : 0x000901F9u;
+            W[2 * l + 0] = (int) __builtin_amdgcn_perm(0u, lut, gv & 0x0F0F0F0Fu);
+            W[2 * l + 1] = (int) __builtin_amdgcn_perm(0u, lut, (gv >> 4) & 0x0F0F0F0Fu);
+        }
+        const uint32_t s01 = r.sc.x, s23 = r.sc.y;
+        iq1m_scale_t scale;
+        scale.u16 = (uint16_t) (((s01 & 0xFFFFu) >> 12) | (((s01 >> 16) >> 8) & 0x00F0u) | (((s23 & 0xFFFFu) >> 4) & 0x0F00u) | ((s23 >> 16) & 0xF000u));
+        sc.d = __half2float(scale.f16) * 0.125f;
+        const int c = iqs / 2;
+        const uint32_t w16 = ((c / 2) < 2 ? (s01 >> (16 * (c / 2))) : (s23 >> (16 * (c / 2 - 2)))) & 0xFFFFu;
+        const int tmp = (int) (w16 >> (6 * (c % 2)));
+        sc.s0 = 2 * ((tmp >> 0) & 0x07) + 1;
+        sc.s1 = 2 * ((tmp >> 3) & 0x07) + 1;
+    }
+    __device__ static __forceinline__ int finish(int lo, int hi, const Sc& sc) { return __mul24(lo, sc.s0) + __mul24(hi, sc.s1); }
+};
+
 // NIT > 0: the row has at most NIT calls a lane (n_embd <= NIT * 32 * 32): every weight load of a pass is issued
 // before the first decode, so a pass waits for memory once, not once a call
 #ifndef STRATA_G9_WPE
@@ -6406,6 +6531,205 @@ __global__ void __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(STRATA
     }
 }
 #endif
+
+#if defined(STRATA_HIP_GFX906)
+// ---- gfx906 dense rows in the grid formats (IQ3_S; Q2_0 from native_q2_0_mmvq): mode 9's decoders on a dense matrix.
+// A row a 32-lane group, 8 rows at a time a block; call k = lane + 32 it is (block k / 8, part k % 8) as in
+// g906_gu_kernel: every load of a row issued first, each call decoded once and applied to every column (activations
+// in LDS).  A column's sums do not depend on how many columns ride along (a window past 8 runs in launches of 8: the
+// same code a column).  The float sums run in another order than mmvq_kernel's (rounding-level).
+// STRATA_G906_DENSE9=0 keeps the old kernels.
+template<int TG, int NC>
+__global__ void __launch_bounds__(256) g906_dense9_kernel(const uint8_t* __restrict__ W, size_t rb,
+                                                          const block_q8_1* __restrict__ xq, int xstride, float* __restrict__ y,
+                                                          int n_in, int n_out, int rpb) {
+    using D = G9<TG>;
+    using GT = typename GridOf<TG>::T;
+    constexpr int NIT = 6;   // n_in <= 6144
+    __shared__ GT sgrid[GridOf<TG>::N];
+    extern __shared__ int sx_raw[];
+    const int tid = threadIdx.x, lane = tid & 31, grp = tid >> 5;
+    const GT* gsrc = GridOf<TG>::src();
+    for (int i = tid; i < GridOf<TG>::N; i += 256) sgrid[i] = gsrc[i];
+    const int xb = n_in / 32, nk = n_in / 32;
+    for (int c = 0; c < NC; ++c) {
+        const int* src = (const int*) (xq + (size_t) c * xstride);
+        for (int i = tid; i < xb * 9; i += 256) sx_raw[c * xb * 9 + i] = src[i];
+    }
+    __syncthreads();
+    const block_q8_1* sx = (const block_q8_1*) sx_raw;
+    const int iqs = 2 * (lane & 7), kb0 = lane >> 3;
+    const block_q8_1* xl = sx + kb0 * 8 + iqs / 2;
+    const int r0 = blockIdx.x * rpb, r1 = min(n_out, r0 + rpb);
+    using R = typename D::Raw;
+    for (int row = r0 + grp; row < r1; row += 8) {
+        const uint8_t* wr = W + (size_t) row * rb + (size_t) kb0 * D::BS;
+        R ra[NIT];
+#pragma unroll
+        for (int it = 0; it < NIT; ++it)
+            if (lane + 32 * it < nk) D::load(wr + (size_t) it * 4 * D::BS, iqs, ra[it]);
+        float acc[NC];
+#pragma unroll
+        for (int c = 0; c < NC; ++c) acc[c] = 0.0f;
+#pragma unroll
+        for (int it = 0; it < NIT; ++it) {
+            if (lane + 32 * it >= nk) break;
+            int Wd[8];
+            typename D::Sc sc;
+            D::decode(ra[it], sgrid, Wd, sc, iqs);
+#pragma unroll
+            for (int c = 0; c < NC; ++c) {
+                const block_q8_1* xk = xl + (size_t) c * xb + it * 32;
+                const int* u = (const int*) xk->qs;
+                int lo = 0, hi = 0;
+#pragma unroll
+                for (int i = 0; i < 4; ++i) lo = ggml_cuda_dp4a(Wd[i], u[i], lo);
+#pragma unroll
+                for (int i = 4; i < 8; ++i) hi = ggml_cuda_dp4a(Wd[i], u[i], hi);
+                acc[c] += (sc.d * __low2float(xk->ds)) * (float) D::finish(lo, hi, sc);
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            const float v = warp_sum(acc[c]);
+            if (lane == 0) y[(size_t) c * n_out + row] = v;
+        }
+    }
+}
+// Q3_K dense: a task is (half n of a block, 8 positions 8g..8g+7) over its 4 bit-pairs j: 8 qs bytes, 8 hmask bytes,
+// 32 values in the q8_1 blocks 4n + j - 8 tasks a block, as the grid formats' 8 calls.  A word's value bytes
+// (2 low bits | high bit << 2, 0..7) become -4..3 with one v_perm_b32.  Rounding-level vs vec_dot_q3_K_q8_1.
+template<int NC>
+__global__ void __launch_bounds__(256) g906_q3k_kernel(const uint8_t* __restrict__ W, size_t rb,
+                                                       const block_q8_1* __restrict__ xq, int xstride, float* __restrict__ y,
+                                                       int n_in, int n_out, int rpb) {
+    constexpr int NIT = 6;   // n_in <= 6144
+    extern __shared__ int sx_raw[];
+    const int tid = threadIdx.x, lane = tid & 31, grp = tid >> 5;
+    const int xb = n_in / 32, nk = n_in / 32;
+    for (int c = 0; c < NC; ++c) {
+        const int* src = (const int*) (xq + (size_t) c * xstride);
+        for (int i = tid; i < xb * 9; i += 256) sx_raw[c * xb * 9 + i] = src[i];
+    }
+    __syncthreads();
+    const block_q8_1* sx = (const block_q8_1*) sx_raw;
+    const int t = lane & 7, n = t >> 2, g = t & 3, kb0 = lane >> 3;
+    struct Raw { g9_i2 q, h; int s0, s1, s2; half d; };   // s0..s2: the 12 scale bytes
+    const int r0 = blockIdx.x * rpb, r1 = min(n_out, r0 + rpb);
+    for (int row = r0 + grp; row < r1; row += 8) {
+        const uint8_t* wr = W + (size_t) row * rb + (size_t) kb0 * sizeof(block_q3_K);
+        Raw ra[NIT];
+#pragma unroll
+        for (int it = 0; it < NIT; ++it)
+            if (lane + 32 * it < nk) {
+                const block_q3_K* b = (const block_q3_K*) (wr + (size_t) it * 4 * sizeof(block_q3_K));
+                ra[it].q = *(const g9_i2*) (b->qs + 32 * n + 8 * g);
+                ra[it].h = *(const g9_i2*) (b->hmask + 8 * g);
+                ra[it].s0 = *(const g9_i1*) (b->scales + 0);
+                ra[it].s1 = *(const g9_i1*) (b->scales + 4);
+                ra[it].s2 = *(const g9_i1*) (b->scales + 8);
+                ra[it].d = b->d;
+            }
+        float acc[NC];
+#pragma unroll
+        for (int c = 0; c < NC; ++c) acc[c] = 0.0f;
+#pragma unroll
+        for (int it = 0; it < NIT; ++it) {
+            if (lane + 32 * it >= nk) break;
+            const Raw& r = ra[it];
+            const float d = __half2float(r.d);
+            const int kb = kb0 + 4 * it;
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                int v[2];
+#pragma unroll
+                for (int w = 0; w < 2; ++w) {
+                    const uint32_t ql = ((uint32_t) (w ? r.q.y : r.q.x) >> (2 * j)) & 0x03030303u;
+                    const uint32_t hb = (((uint32_t) (w ? r.h.y : r.h.x) >> (4 * n + j)) & 0x01010101u) << 2;
+                    v[w] = (int) __builtin_amdgcn_perm(0x03020100u, 0xFFFEFDFCu, ql | hb);
+                }
+                // scale of sub-block 8n + 2j + (g >> 1): low 4 bits from byte 2j + (g >> 1) (shift 4n), high 2 from byte
+                // 8 + (2j + (g >> 1)) % 4 (shift 2 (2n + j / 2))
+                const int sb = 2 * j + (g >> 1);
+                const uint32_t lw = (uint32_t) (sb < 4 ? r.s0 : r.s1), hw = (uint32_t) r.s2;
+                const int lo4 = (int) ((lw >> (8 * (sb & 3) + 4 * n)) & 0xFu);
+                const int hi2 = (int) ((hw >> (8 * (sb & 3) + 2 * (2 * n + j / 2))) & 0x3u);
+                const int scale = (lo4 | (hi2 << 4)) - 32;
+#pragma unroll
+                for (int c = 0; c < NC; ++c) {
+                    const block_q8_1* xk = sx + (size_t) c * xb + kb * 8 + 4 * n + j;
+                    const int* u = (const int*) xk->qs + 2 * g;
+                    const int sumi = ggml_cuda_dp4a(v[1], u[1], ggml_cuda_dp4a(v[0], u[0], 0));
+                    acc[c] += (d * __low2float(xk->ds)) * (float) (sumi * scale);
+                }
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            const float v = warp_sum(acc[c]);
+            if (lane == 0) y[(size_t) c * n_out + row] = v;
+        }
+    }
+}
+static void g906_q3k_launch(const uint8_t* W, size_t rb, const block_q8_1* X, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
+    int rpb = (n_out / 256) & ~7;
+    rpb = rpb < 8 ? 8 : rpb > 64 ? 64 : rpb;
+    const unsigned nbk = (unsigned) ((n_out + rpb - 1) / rpb);
+    const int xb = n_in / 32;
+    for (int c0 = 0; c0 < ncols; c0 += 8) {
+        const int nc = min(8, ncols - c0);
+        const size_t sh = (size_t) nc * xb * sizeof(block_q8_1);
+        const block_q8_1* xc = X + (size_t) c0 * xb;
+        float* yc = y + (size_t) c0 * n_out;
+        switch (nc) {
+#define STRATA_D3(N) case N: g906_q3k_kernel<N><<<nbk, 256, sh, s>>>(W, rb, xc, xb, yc, n_in, n_out, rpb); break;
+            STRATA_D3(1) STRATA_D3(2) STRATA_D3(3) STRATA_D3(4) STRATA_D3(5) STRATA_D3(6) STRATA_D3(7) default: g906_q3k_kernel<8><<<nbk, 256, sh, s>>>(W, rb, xc, xb, yc, n_in, n_out, rpb); break;
+#undef STRATA_D3
+        }
+    }
+}
+template<int TG>
+static void g906_dense9_launch(const uint8_t* W, size_t rb, const block_q8_1* X, float* y, int n_in, int n_out, int ncols, cudaStream_t s) {
+    int rpb = (n_out / 256) & ~7;
+    rpb = rpb < 8 ? 8 : rpb > 64 ? 64 : rpb;
+    const unsigned nbk = (unsigned) ((n_out + rpb - 1) / rpb);
+    const int xb = n_in / 32;
+    for (int c0 = 0; c0 < ncols; c0 += 8) {   // windows past 8 columns: launches of 8, the same code a column
+        const int nc = min(8, ncols - c0);
+        const size_t sh = (size_t) nc * xb * sizeof(block_q8_1);
+        const block_q8_1* xc = X + (size_t) c0 * xb;
+        float* yc = y + (size_t) c0 * n_out;
+        switch (nc) {
+#define STRATA_D9(N) case N: g906_dense9_kernel<TG, N><<<nbk, 256, sh, s>>>(W, rb, xc, xb, yc, n_in, n_out, rpb); break;
+            STRATA_D9(1) STRATA_D9(2) STRATA_D9(3) STRATA_D9(4) STRATA_D9(5) STRATA_D9(6) STRATA_D9(7) default: g906_dense9_kernel<TG, 8><<<nbk, 256, sh, s>>>(W, rb, xc, xb, yc, n_in, n_out, rpb); break;
+#undef STRATA_D9
+        }
+    }
+}
+#endif
+// by shape only (type, n_in): never by the column count
+bool g906_dense9(int t, const void* w, size_t rb, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
+#if defined(STRATA_HIP_GFX906)
+    static const bool on = [] { const char* v = std::getenv("STRATA_G906_DENSE9"); return !(v && v[0] == '0'); }();
+    if (!on || n_in % QK_K != 0 || n_in > 6144 || n_out <= 0) return false;
+    const auto* W = (const uint8_t*) w;
+    const auto* X = (const block_q8_1*) x_q8_1;
+    cudaStream_t s = (cudaStream_t) stream;
+    switch (t) {
+        case 21: g906_dense9_launch<21>(W, rb, X, y, n_in, n_out, ncols, s); break;
+        case 11: g906_q3k_launch(W, rb, X, y, n_in, n_out, ncols, s); break;
+        case 42:   // Q2_0's 640-row shared-expert matrices: the old kernel (6.7 vs 7.7 us at T = 2)
+            if (n_out < 2048) return false;
+            g906_dense9_launch<42>(W, rb, X, y, n_in, n_out, ncols, s); break;
+        default: return false;
+    }
+    check("g906_dense9");
+    return true;
+#else
+    (void) t; (void) w; (void) rb; (void) x_q8_1; (void) y; (void) n_in; (void) n_out; (void) ncols; (void) stream;
+    return false;
+#endif
+}
 
 #if defined(STRATA_HIP_GFX906)
 // ---- 9 (gfx906) down, IQ4_NL and Q2_0: a row of n_ff = 640 inputs is 20 IQ4_NL / 10 Q2_0 blocks; mode 7/8's kernel gave it 32 lanes of
@@ -6748,14 +7072,15 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #endif
 #endif
 #if STRATA_EXP_LAYOUTS
-    const bool fused_gu = !nib_layout(L) && (em0 == 8 || em0 == 9) && ((kExpLds16 && L.gu_type == 16) || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23) &&
+    const bool g9_iq2 = em0 == 9 && g906_iq2() && L.n_embd % QK_K == 0 && (L.gu_type == 16 || L.gu_type == 17 || L.gu_type == 29 || L.gu_type == 42);   // gfx906 only (em0 9)
+    const bool fused_gu = !nib_layout(L) && (em0 == 8 || em0 == 9) && ((kExpLds16 && L.gu_type == 16) || g9_iq2 || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23) &&
                           L.n_ff % 32 == 0;
     if (fused_gu && g_exp_phase != 2) {
         const dim3 gl((unsigned) (L.n_ff / 32), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_embd / 32) * sizeof(block_q8_1);
 #if defined(STRATA_HIP_GFX906)
         // mode 9: the gfx906 decode-once kernel for the grid formats (bitwise mode 8)
-        const bool g9 = em0 == 9 && L.n_embd % QK_K == 0 && (L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22);
+        const bool g9 = g9_iq2 || (em0 == 9 && L.n_embd % QK_K == 0 && (L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22));
 #else
         const bool g9 = false;
 #endif
@@ -6763,7 +7088,11 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #if defined(STRATA_HIP_GFX906)
             const bool n3 = L.n_embd <= 3 * 32 * 32;   // <= 3 calls a lane: the hoisted loads (2560: 80 calls a row)
 #define STRATA_G9(T) (n3 ? g906_gu_kernel<T, 3> : g906_gu_kernel<T, 0>)<<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq)
-            if (L.gu_type == 18) STRATA_G9(18);
+            if (L.gu_type == 16) STRATA_G9(16);
+            else if (L.gu_type == 17) STRATA_G9(17);
+            else if (L.gu_type == 42) STRATA_G9(42);
+            else if (L.gu_type == 29) STRATA_G9(29);
+            else if (L.gu_type == 18) STRATA_G9(18);
             else if (L.gu_type == 21) STRATA_G9(21);
             else STRATA_G9(22);
 #undef STRATA_G9
