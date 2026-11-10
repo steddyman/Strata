@@ -976,9 +976,12 @@ __device__ __forceinline__ float g906_group_sum_dpp(float v) {   // the sum of e
     return v;
 }
 inline int g906_lpr(int ntask) {
-    for (int l : {64, 32, 16}) if (ntask % l == 0 && ntask / l >= 4) return l;
-    for (int l : {8, 4}) if (ntask % l == 0) return l;
-    return 8;
+    // the widest group of at most 8 lanes (DS4_G906_LPR_MAX: the bench) that divides the tasks and gives each lane >= 4.  Rocprof,
+    // 256 decode tokens, the k = 4096 / 5120 / 8192 matrices (wo_a, the shared expert, wo_b): at most 32 lanes 1.53 s, 16 1.38, 8 1.23, 4 1.30
+    static const int cap = [] { const char* e = std::getenv("DS4_G906_LPR_MAX"); return e ? std::atoi(e) : 8; }();
+    for (int l : {64, 32, 16, 8}) if (l <= cap && ntask % l == 0 && ntask / l >= 4) return l;
+    for (int l : {8, 4}) if (l <= cap && ntask % l == 0) return l;
+    return 4;
 }
 inline bool g906_q5k_on() {
     static const bool on = [] { const char* e = std::getenv("DS4_G906_Q5K"); return !(e && e[0] == '0'); }();
