@@ -885,7 +885,9 @@ void run_gemm(const TypeInfo& ty, const Kern& kn, bool quick) {
 #if defined(DQ_HIP)
                 if (path == 1) {
                     ++pf_tried;
+#if !defined(STRATA_HIP_GFX906)   // (gfx906 has no WMMA and no strata_pf_gemm_f16_ld: the path is never taken)
                     if (s.rows >= 64 && ((uintptr_t) d_x & 15u) == 0 && strata_pf_gemm_f16_ld(d_x, s.k, d_w, s.k, d_y + c0, s.rows, nc, s.k, s.n, 0.0f, nullptr)) { ++pf_taken; continue; }
+#endif
                     taken = false;
                     continue;
                 }
