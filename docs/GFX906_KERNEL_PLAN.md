@@ -45,7 +45,20 @@ explains it: the time is spread over about 35 launches per layer, most of them w
 | 0.1.59.1 (stable) | 51.5 | 39 tok/s | reference |
 | + DPP / swizzle for constant `__shfl_xor` (exact) | ~50.2 | | 100.00 %, KL 0 |
 | + gfx906 defaults table (exact in the gate) | 48.4 | | 100.00 %, KL 0 |
-| + Q6_K kernel and DPP row sums (rounding order) | **44.7** | **43–45 tok/s** | 95.04 %, KL 0.0228, PPL 4.031 (control: 94.85 %, 0.0242, 4.103) |
+| + Q6_K kernel and DPP row sums (rounding order) | 44.7 | 43–45 tok/s | 95.04 %, KL 0.0228, PPL 4.031 (control: 94.85 %, 0.0242, 4.103) |
+| + two-kernel hyper-connection read (no norm launch) | 41.7 | ~46 tok/s | |
+| + Q4_K and IQ4_XS kernels, IQ3_XXS sign unpack | **41.2** | **46.5 tok/s** | 95.20 %, KL 0.0216, PPL 4.094 (0.1.59.8) |
+
+What did not pay: LDS staging alone on the CUDA-shaped kernels (the weight loads, not the activations, bound
+them), more rows per wavefront, a software prefetch that doubled the registers (two waves a SIMD), the existing
+`STRATA_GR_V3` read (it needs 80 KB of LDS; gfx906 has 64 KB), dword loads in `get_int_b2` (the expert gate/up is
+ALU-bound: VALU 63 %, memory 35 %). Pitfalls met: indexing a register vector's bytes (`&hdr`) put it in scratch
+(Q4_K 35 -> 54 us until fixed); a kernel chosen by column count breaks verify's per-column exactness.
+
+Next, by the trace (rocprofv3 --kernel-trace on a live serve; the engine must get SIGINT itself to write it):
+expert gate/up and down (~4 s of 26 s traced, ALU-bound grid lookups), QSA `attn_merge` (87 us on 24 blocks),
+the router chain (BF16 MMVF + `route_multi`, ~1.7 s), the shared expert (8 launches a layer), the remaining wave
+kernels (Q5_K, Q8_0, IQ4_NL with 640-wide rows).
 
 ISA notes that paid (Vega 7nm ISA, GPUOpen 26-Nov-2019): DPP `quad_perm` / `row_half_mirror` / `row_ror:8` and
 `ds_swizzle_b32` replace `ds_bpermute` for xor 1-16; DPP `row_bcast15/31` finish a 64-lane sum; `global_load_dwordx4`
