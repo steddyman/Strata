@@ -85,9 +85,20 @@ At `auto` clocks each GPU is busy ~70-77 % of a steady decode: the rest is the w
 trip, not kernel time.  The drafter's LM head (106K x 2560 Q6_K, 340 us a window) already reads at ~85 % of the
 read roofline.
 
-Still to do: the experts' occupancy (VGPRs 76-97, ~350 GB/s), the Q2_0 expert down (same lane waste as IQ4_NL had),
-the hyper-connection kernels' scaling with T (down 15 -> 37 us from T 1 to 4; rows a block re-swept, 16 stays best),
-the window's host/cross-GPU idle.
+Round 3 (0.1.59.12, not installed): a Q2_0 expert down kernel (T 2: 60 -> 42 us), the gate/up kernel at 3 waves a
+SIMD (IQ2_S -13 %, IQ3_S -6 %, IQ3_XXS -8 % vs mode 8, bitwise), a split LDS layout in the hc down read (bitwise, ~5 %).
+**The window did not get faster** (25.8 vs 25.9 ms; tok/s moved only with tokens a window, 1.77-2.02, which follows
+the text).  At `auto` clocks the kernels are no longer what bounds the window:
+
+- moving layers between the GPUs (`--layer-split 26` / `28` vs auto's 24) changed nothing (25.4-26.3 ms);
+- `STRATA_VERIFY_DEVICE_PLAN=1` (plan resident layers on the GPU, exact) changed nothing;
+- the HIP API trace: `hipGraphLaunch` ~8 % of wall (~8.5 graphs a window, ~50 us each); the host thread otherwise
+  polls; each GPU is busy ~70 %, CUDA0 idle ~12 ms a window waiting for the other side.
+
+So the window is a dependency chain - the CPU expert plan a layer (doorbell -> host -> `wait_flag_ge`), the GPU hand-off,
+the MTP draft steps (~0.95 ms each on CUDA1, 340 us of it the 106K-row LM head), speculative windows mostly rolled back
+- rather than a sum of kernel time.  Next work there is scheduling, not kernels: what a window waits on per layer, the
+rollback rate of `--pipeline-windows 2`, and where the drafter runs.
 
 Next, by the trace (rocprofv3 --kernel-trace on a live serve; the engine must get SIGINT itself to write it):
 expert gate/up and down (~4 s of 26 s traced, ALU-bound grid lookups), QSA `attn_merge` (87 us on 24 blocks),
