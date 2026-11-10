@@ -2823,6 +2823,259 @@ static bool gr_up_pf_dispatch(int pf, int n_tok, const GrMulti& m, const float* 
 
 // One read of at most kFusedGrMaxT tokens: the kernels below are built for that many (the instantiations, the shared
 // memory, the by-value launch argument), whatever the window is.
+#if defined(STRATA_HIP_GFX906)
+// ---- gfx906 hyper-connection read (STRATA_G906_HC=0: the read below).  Two kernels, no norm launch, for 1-4 tokens:
+//   down: grid (row groups, stream c).  The block stages r * w_norm of stream c for every token in LDS (r = R, plus the
+//         pending write), and a wavefront dots whole weight rows against it: 5 x 16-byte loads a lane, a DPP sum.  It
+//         writes the UNSCALED partial dot of (row, stream) - rs_c is a scalar, so dot(W, r g rs) = rs dot(W, r g) - and
+//         block 0 of each stream also the stream's sum of squares of r.
+//   up:   320 blocks of 4 wavefronts, 8 lanes a row (5 x 16-byte loads a lane).  Each block rebuilds lo (and rs, and the
+//         inject sums) from the partials; block 0 writes them out.  A wavefront holds 2 columns x 4 streams, so the
+//         sigmoid gate and the mean over the streams finish inside it (xor 8 / 16: DPP and ds_swizzle).
+// Another summation order than the CUDA read (the norm's sum, the dot's), so not bitwise it; deterministic.
+static int g9_rpb() {   // down rows a block (STRATA_G906_HC_RPB: 4 / 8 / 16; the 4 wavefronts take them in turn)
+    static const int r = [] { const char* v = std::getenv("STRATA_G906_HC_RPB"); const int x = v ? std::atoi(v) : 16; return x == 4 || x == 8 ? x : 16; }();
+    return r;
+}
+typedef unsigned int g9_v4u __attribute__((ext_vector_type(4)));
+__device__ __forceinline__ float g9_dot8(uint4 w, const float4 a, const float4 b, float acc) {
+    acc = fmaf(__uint_as_float(w.x << 16), a.x, acc);
+    acc = fmaf(__uint_as_float(w.x & 0xffff0000u), a.y, acc);
+    acc = fmaf(__uint_as_float(w.y << 16), a.z, acc);
+    acc = fmaf(__uint_as_float(w.y & 0xffff0000u), a.w, acc);
+    acc = fmaf(__uint_as_float(w.z << 16), b.x, acc);
+    acc = fmaf(__uint_as_float(w.z & 0xffff0000u), b.y, acc);
+    acc = fmaf(__uint_as_float(w.w << 16), b.z, acc);
+    acc = fmaf(__uint_as_float(w.w & 0xffff0000u), b.w, acc);
+    return acc;
+}
+__device__ __forceinline__ float g9_wave_sum(float v) {   // the full sum in lane 63 (as native_mmvq.cu's)
+    v += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), 0xb1, 0xf, 0xf, false));
+    v += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), 0x4e, 0xf, 0xf, false));
+    v += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), 0x141, 0xf, 0xf, false));
+    v += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), 0x140, 0xf, 0xf, false));
+    v += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), 0x142, 0xa, 0xf, false));
+    v += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), 0x143, 0xc, 0xf, false));
+    return v;
+}
+template <int T, int RPB>
+__global__ void __launch_bounds__(THREADS) g906_hc_down_kernel(GrMulti m, float* __restrict__ part, float* __restrict__ ssg) {
+    __shared__ __align__(16) float xs[T][N];            // r * w_norm of stream c, every token
+    __shared__ float red[T][THREADS / 64];
+    const int c = blockIdx.y, t = threadIdx.x, lane = t & 63, wave = t >> 6;
+    float ss[T];
+    // a thread's (at most 3) float4 of the stream: every load issued before any is used, the gate once a token
+    constexpr int J = (N / 4 + THREADS - 1) / THREADS;    // 3 (2560 / 4 / 256 = 2.5)
+    float4 g[J], r[T][J], b[T][J];
+    float gw[T];
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+        const int i = (t + j * THREADS) * 4;
+        if (i < N) {
+            g[j] = *reinterpret_cast<const float4*>(m.a[0].w_norm + c * N + i);
+#pragma unroll
+            for (int k = 0; k < T; ++k) {
+                r[k][j] = *reinterpret_cast<const float4*>(m.a[k].R + c * N + i);
+                if (m.a[k].apply) b[k][j] = *reinterpret_cast<const float4*>(m.a[k].bo_prev + i);
+            }
+        }
+    }
+#pragma unroll
+    for (int k = 0; k < T; ++k) {
+        ss[k] = 0.0f;
+        gw[k] = m.a[k].apply ? 2.0f * sigmoidf_(m.a[k].inj_prev[c] / (float) HC) : 0.0f;
+    }
+#pragma unroll
+    for (int j = 0; j < J; ++j) {
+        const int i = (t + j * THREADS) * 4;
+        if (i < N) {
+#pragma unroll
+            for (int k = 0; k < T; ++k) {
+                float4 x = r[k][j];
+                if (m.a[k].apply) {
+                    const float4 bb = b[k][j];
+                    x.x = fmaf(bb.x, gw[k], x.x); x.y = fmaf(bb.y, gw[k], x.y); x.z = fmaf(bb.z, gw[k], x.z); x.w = fmaf(bb.w, gw[k], x.w);
+                }
+                ss[k] += x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;
+                // split layout: an 8-value chunk's halves in two planes (plane h at h * N / 2), so the row loop's two
+                // 16-byte reads a lane are contiguous across lanes (bitwise the same sums; T 4 36.8 -> 34.4 us)
+                const int xi = ((i >> 2) & 1) * (N / 2) + (i >> 3) * 4;
+                *reinterpret_cast<float4*>(&xs[k][xi]) = make_float4(x.x * g[j].x, x.y * g[j].y, x.z * g[j].z, x.w * g[j].w);
+            }
+        }
+    }
+    if (blockIdx.x == 0) {
+#pragma unroll
+        for (int k = 0; k < T; ++k) {
+            const float v = g9_wave_sum(ss[k]);
+            if (lane == 63) red[k][wave] = v;
+        }
+    }
+    __syncthreads();
+    if (blockIdx.x == 0 && t < T) ssg[t * HC + c] = (red[t][0] + red[t][1]) + (red[t][2] + red[t][3]);
+    constexpr int Q = N / 8 / 64;                         // 5 chunks of 8 a lane
+    const int row_end = min((int) (blockIdx.x + 1) * RPB, m.a[0].w_inject != nullptr ? PR : LR);
+    auto row_ptr = [&](int row) -> const uint4* {
+        return reinterpret_cast<const uint4*>(row < LR ? m.a[0].w_down + (size_t) row * D + (size_t) c * N
+                                                       : m.a[0].w_inject + (size_t) (row - LR) * D + (size_t) c * N);
+    };
+    int row = blockIdx.x * RPB + wave;
+    uint4 wn_[Q];                                         // the next row's weights, in flight while this row is summed
+    if (row < row_end) {
+        const uint4* w4 = row_ptr(row);
+#pragma unroll
+        for (int q = 0; q < Q; ++q) wn_[q] = w4[lane + 64 * q];
+    }
+#pragma unroll 1
+    for (; row < row_end; row += 4) {
+    uint4 w[Q];
+#pragma unroll
+    for (int q = 0; q < Q; ++q) w[q] = wn_[q];
+    if (row + 4 < row_end) {
+        const uint4* w4 = row_ptr(row + 4);
+#pragma unroll
+        for (int q = 0; q < Q; ++q) wn_[q] = w4[lane + 64 * q];
+    }
+    // the tokens two at a time, each pair summed and written at once: registers stay those of T = 2 whatever T is
+#pragma unroll 1
+    for (int k0 = 0; k0 < T; k0 += 2) {
+        float a0 = 0.0f, a1 = 0.0f;
+        const bool two = k0 + 1 < T;
+#pragma unroll
+        for (int q = 0; q < Q; ++q) {
+            const int e = (lane + 64 * q) * 4;            // the chunk's halves in the split layout
+            a0 = g9_dot8(w[q], *reinterpret_cast<const float4*>(&xs[k0][e]), *reinterpret_cast<const float4*>(&xs[k0][N / 2 + e]), a0);
+            if (two) a1 = g9_dot8(w[q], *reinterpret_cast<const float4*>(&xs[k0 + 1][e]), *reinterpret_cast<const float4*>(&xs[k0 + 1][N / 2 + e]), a1);
+        }
+        a0 = g9_wave_sum(a0);
+        if (lane == 63) part[((size_t) k0 * HC + c) * PR + row] = a0;
+        if (two) {
+            a1 = g9_wave_sum(a1);
+            if (lane == 63) part[((size_t) (k0 + 1) * HC + c) * PR + row] = a1;
+        }
+    }
+    }
+}
+template <int T>
+__global__ void __launch_bounds__(THREADS) g906_hc_up_kernel(GrMulti m, const float* __restrict__ part, const float* __restrict__ ssg) {
+    __shared__ __align__(16) float lo[T][LR];
+    __shared__ float rs_s[T][HC];
+    const int t = threadIdx.x, lane = t & 63, wave = t >> 6;
+    const int s8 = lane & 7, j = lane >> 3, c = j & 3, dd = j >> 2;
+    const int d = (blockIdx.x * 4 + wave) * 2 + dd;       // 2 columns a wavefront, 8 a block
+    const int i = c * N + d;
+    constexpr int Q = LR / 8 / 8;                         // 5 chunks of 8 a lane
+    const uint4* w4 = reinterpret_cast<const uint4*>(m.a[0].w_up + (size_t) i * LR);
+    uint4 w[Q];
+#pragma unroll
+    for (int q = 0; q < Q; ++q) w[q] = w4[s8 + 8 * q];
+    float x0s[T], gws[T];                                 // per token: R (with the pending write), w_norm * gate inputs
+    const float wnorm = m.a[0].w_norm[i];
+#pragma unroll
+    for (int k = 0; k < T; ++k) {
+        const FusedGrArgs& a = m.a[k];
+        x0s[k] = a.R[i];
+        gws[k] = a.apply ? a.bo_prev[d] : 0.0f;
+    }
+    if (t < T * HC) {
+        const int k = t / HC, cc = t - k * HC;
+        const float r = rsqrtf(ssg[k * HC + cc] / (float) N + m.a[k].eps);
+        rs_s[k][cc] = r;
+        if (blockIdx.x == 0) m.a[k].rs[cc] = r;
+    }
+    __syncthreads();
+    // every thread's (at most U) entries: all their partial loads issued before any is used
+    constexpr int U = (T * PR + THREADS - 1) / THREADS;
+    float pv[U][HC];
+#pragma unroll
+    for (int u = 0; u < U; ++u) {
+        const int idx = t + u * THREADS;
+        if (idx < T * PR) {
+            const int k = idx / PR, r = idx - k * PR;
+#pragma unroll
+            for (int cc = 0; cc < HC; ++cc) pv[u][cc] = part[((size_t) k * HC + cc) * PR + r];
+        }
+    }
+#pragma unroll
+    for (int u = 0; u < U; ++u) {
+        const int idx = t + u * THREADS;
+        if (idx >= T * PR) break;
+        const int k = idx / PR, r = idx - k * PR;
+        float s = 0.0f;
+#pragma unroll
+        for (int cc = 0; cc < HC; ++cc) s = fmaf(rs_s[k][cc], pv[u][cc], s);
+        if (r < LR) {
+            const float x = s / (float) HC;
+            const float l = x / (1.0f + __expf(-x));
+            lo[k][r] = l;
+            if (blockIdx.x == 0) m.a[k].lo[r] = l;
+        } else if (blockIdx.x == 0 && m.a[k].w_inject != nullptr) {
+            m.a[k].inject_out[r - LR] = s;
+        }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int k = 0; k < T; ++k) {
+        float acc = 0.0f;
+#pragma unroll
+        for (int q = 0; q < Q; ++q) {
+            const int e = (s8 + 8 * q) * 8;
+            acc = g9_dot8(w[q], *reinterpret_cast<const float4*>(&lo[k][e]), *reinterpret_cast<const float4*>(&lo[k][e + 4]), acc);
+        }
+        acc += __shfl_xor(acc, 4, 64);                     // the row's 8 lanes (DPP)
+        acc += __shfl_xor(acc, 2, 64);
+        acc += __shfl_xor(acc, 1, 64);
+        const FusedGrArgs& a = m.a[k];
+        float x0 = x0s[k];
+        if (a.apply) {
+            x0 = fmaf(gws[k], 2.0f * sigmoidf_(a.inj_prev[c] / (float) HC), x0);
+            if (s8 == 0) a.R_out[i] = x0;
+        }
+        float g = x0 * wnorm * rs_s[k][c] * sigmoidf_(acc);
+        g += __shfl_xor(g, 8, 64);                         // the 4 streams of column d: lane groups c = 0..3
+        g += __shfl_xor(g, 16, 64);
+        if (s8 == 0 && c == 0) a.mixed[d] = g / (float) HC;
+    }
+}
+static int g906_hc_on() {
+    static const int on = [] { const char* v = std::getenv("STRATA_G906_HC"); return v == nullptr || v[0] != '0'; }();
+    return on;
+}
+static bool g906_hc_read(const GrMulti& m, int n_tok, float* scratch, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
+    if (!g906_hc_on() || n_tok < 1 || n_tok > 4 || m.a[0].s_down != nullptr || m.a[0].s_up != nullptr || m.a[0].w_down == nullptr) return false;
+    for (int k = 0; k < n_tok; ++k) if (m.a[k].q8_mixed != nullptr) return false;
+    float* part = scratch;                                // n_tok * HC * PR floats
+    float* ssg = scratch + (size_t) 4 * HC * PR;          // n_tok * HC floats
+    if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
+    const int rpb = g9_rpb();
+    const dim3 dg((PR + rpb - 1) / rpb, HC);
+#define G9_DOWN(TT) do { if (rpb == 4) g906_hc_down_kernel<TT, 4><<<dg, THREADS, 0, st>>>(m, part, ssg); \
+                         else if (rpb == 16) g906_hc_down_kernel<TT, 16><<<dg, THREADS, 0, st>>>(m, part, ssg); \
+                         else g906_hc_down_kernel<TT, 8><<<dg, THREADS, 0, st>>>(m, part, ssg); } while (0)
+    switch (n_tok) {
+        case 1: G9_DOWN(1); break;
+        case 2: G9_DOWN(2); break;
+        case 3: G9_DOWN(3); break;
+        default: G9_DOWN(4); break;
+    }
+#undef G9_DOWN
+    if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0 + 1, (void*) st);
+    const unsigned ub = N / 8;                            // 320 blocks
+    switch (n_tok) {
+        case 1: g906_hc_up_kernel<1><<<ub, THREADS, 0, st>>>(m, part, ssg); break;
+        case 2: g906_hc_up_kernel<2><<<ub, THREADS, 0, st>>>(m, part, ssg); break;
+        case 3: g906_hc_up_kernel<3><<<ub, THREADS, 0, st>>>(m, part, ssg); break;
+        default: g906_hc_up_kernel<4><<<ub, THREADS, 0, st>>>(m, part, ssg); break;
+    }
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "fused_gr_read_multi (gfx906): %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+    return true;
+}
+#endif
+
 static bool fused_gr_read_multi_slice(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
                                       unsigned long long* stamp_buf, int stamp_i0) {
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
@@ -2864,6 +3117,9 @@ static bool fused_gr_read_multi_slice(const FusedGrArgs* a, int n_tok, float* xn
         }
         return q8;
     }
+#if defined(STRATA_HIP_GFX906)
+    if (!q8 && g906_hc_read(m, n_tok, xn_scratch, st, stamp_buf, stamp_i0)) return false;
+#endif
     // the two-kernel read above (another summation order): STRATA_GR_V3=0 / 1, unset = gr_v3_default_on (a 12.0 card with > 13 GiB)
     static const int v3_env = [] { const char* v = std::getenv("STRATA_GR_V3"); return v != nullptr ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
     static int split3[64] = {};   // per device: 0 = not decided yet, 1 / 2 = column halves S, -1 = does not fit

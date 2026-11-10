@@ -238,25 +238,40 @@ bool MtpDrafter::make_q4_dense(const std::vector<uint8_t>& blob, std::string& er
 #endif
 }
 
-// --mtp-q4: the draft head's subset rows as Q4_0 (dequantized from the main head's format)
+// --mtp-q4: the draft head's subset rows as 4-bit rows (dequantized from the main head's format).  Q4_0 by default; gfx906
+// takes IQ4_XS (its g906_iq4xs_kernel reads the 106K-row head in 220 us against 328 for Q4_0 on the wave kernel and 344 for
+// the Q6_K head, mmvq_bench; IQ4_XS's non-linear grid is also nearer the Q6_K rows than Q4_0's).  STRATA_MTP_HEAD_FMT=q4_0 /
+// iq4_xs / q4_k picks one.  Only the drafts change: the verify window keeps the main head, so the output does not.
 bool MtpDrafter::make_q4_head(std::string& err) {
 #ifdef STRATA_NATIVE_EXPERTS
     const int64_t N = g_->n_embd;
     const auto* tt = ggml_get_type_traits((ggml_type) head_->type());
     if (tt == nullptr || tt->to_float == nullptr || N % 32 != 0) { err = "mtp: --mtp-q4 cannot read the head's format"; return false; }
-    const size_t in_row = head_->row_bytes(), out_row = (size_t) (N / 32) * 18;
+#if defined(STRATA_HIP_GFX906)
+    int fmt = 23;   // IQ4_XS
+#else
+    int fmt = GGML_Q4_0;
+#endif
+    if (const char* f = std::getenv("STRATA_MTP_HEAD_FMT"); f != nullptr) {
+        const std::string v = f;
+        fmt = v == "q4_0" ? GGML_Q4_0 : v == "iq4_xs" ? 23 : v == "q4_k" ? 12 : fmt;
+    }
+    if (fmt != GGML_Q4_0 && N % 256 != 0) fmt = GGML_Q4_0;
+    const size_t in_row = head_->row_bytes();
+    const size_t out_row = fmt == GGML_Q4_0 ? (size_t) (N / 32) * 18 : (size_t) (N / 256) * (fmt == 23 ? 136 : 144);
     std::vector<uint8_t> src((size_t) n_dvocab_ * in_row), dst((size_t) n_dvocab_ * out_row);
     if (cudaMemcpy(src.data(), dhead_, src.size(), cudaMemcpyDeviceToHost) != cudaSuccess) { err = "mtp: reading the draft head"; return false; }
     std::vector<float> row((size_t) N);
     for (int64_t r = 0; r < n_dvocab_; ++r) {
         tt->to_float(src.data() + (size_t) r * in_row, row.data(), N);
-        ggml_quantize_chunk(GGML_TYPE_Q4_0, row.data(), dst.data() + (size_t) r * out_row, 0, 1, N, nullptr);
+        ggml_quantize_chunk((ggml_type) fmt, row.data(), dst.data() + (size_t) r * out_row, 0, 1, N, nullptr);
     }
-    // the Q4_0 rows replace the subset in place (they are smaller)
+    // the 4-bit rows replace the subset in place (they are smaller)
     if (cudaMemcpy(dhead_, dst.data(), dst.size(), cudaMemcpyHostToDevice) != cudaSuccess) { err = "mtp: writing the draft head"; return false; }
-    dhead_type_ = GGML_Q4_0;
-    std::fprintf(stderr, "strata mtp: --mtp-q4: draft head over %lld tokens as Q4_0 (%.1f MiB read per step, was %.1f)\n",
-                 (long long) n_dvocab_, (double) dst.size() / 1048576.0, (double) src.size() / 1048576.0);
+    dhead_type_ = fmt;
+    std::fprintf(stderr, "strata mtp: --mtp-q4: draft head over %lld tokens as %s (%.1f MiB read per step, was %.1f)\n",
+                 (long long) n_dvocab_, fmt == GGML_Q4_0 ? "Q4_0" : fmt == 23 ? "IQ4_XS" : "Q4_K",
+                 (double) dst.size() / 1048576.0, (double) src.size() / 1048576.0);
     return true;
 #else
     err = "mtp: --mtp-q4 needs a build with native experts (ggml)";

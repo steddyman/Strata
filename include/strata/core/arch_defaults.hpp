@@ -105,5 +105,9 @@ std::vector<std::pair<std::string, std::string>> launch_default_env(const char* 
 /// returns the names it set.  `integrated` is true when every visible GPU is an integrated one.  Call once, before any
 /// engine code reads its switches (they are read lazily, at first use).
 std::vector<std::string> apply_arch_defaults(const char* gcn_arch, bool integrated = false, int batch_slots = 0);
+/// gfx906 (the STRATA_HIP_GFX906 build): its measured defaults, and setting them in this process where the user has not
+/// (STRATA_GFX906_DEFAULTS=0: none).  Returns the names it set.
+std::vector<std::pair<std::string, std::string>> gfx906_default_env();
+std::vector<std::string> apply_gfx906_defaults();
 
 }  // namespace strata::core

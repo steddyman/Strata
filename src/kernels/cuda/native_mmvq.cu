@@ -2364,8 +2364,26 @@ void launch_check() {
 // butterfly instead of the LDS partials and __syncthreads of the one-block-per-row layout: on gfx906 a block per
 // 2 KB row spent most of its time being launched and joined.  The SAME kernel serves every column count 1..8, so a
 // column's sums do not depend on how many columns (verify tokens) ride along.  STRATA_MMVQ_WAVE=0: the CUDA layout.
+// gfx906: a 64-lane float sum with DPP lane moves instead of a ds_bpermute butterfly (Vega 7nm ISA 13.3.9: quad_perm,
+// row_half_mirror, row_mirror, row_bcast15/31 - VALU ops with 2 wait states, no LDS round trip).  The full sum lands in
+// lane 63.  The order is fixed per lane set, so a column's sum does not depend on the other columns.  STRATA_G906_DPP=0:
+// the butterfly.
+template<int CTRL, int ROW_MASK>
+__device__ __forceinline__ float g906_dpp(float v) {
+    return __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), CTRL, ROW_MASK, 0xf, false));
+}
+__device__ __forceinline__ float g906_wave_sum_dpp(float v) {
+    v += g906_dpp<0xb1, 0xf>(v);    // quad_perm [1,0,3,2]
+    v += g906_dpp<0x4e, 0xf>(v);    // quad_perm [2,3,0,1]: each quad's sum in its four lanes
+    v += g906_dpp<0x141, 0xf>(v);   // row_half_mirror: each 8 lanes' sum
+    v += g906_dpp<0x140, 0xf>(v);   // row_mirror: each row of 16's sum, in every lane of the row
+    v += g906_dpp<0x142, 0xa>(v);   // row_bcast15 into rows 1 and 3: row 1 = r0 + r1, row 3 = r2 + r3
+    v += g906_dpp<0x143, 0xc>(v);   // row_bcast31 into rows 2 and 3: row 3 = r0 + r1 + r2 + r3
+    return v;                       // lane 63 holds the wavefront's sum
+}
+bool g_g906_dpp = !(std::getenv("STRATA_G906_DPP") && std::string(std::getenv("STRATA_G906_DPP")) == "0");
 bool g_wave_off = std::getenv("STRATA_MMVQ_WAVE") && std::string(std::getenv("STRATA_MMVQ_WAVE")) == "0";
-template<typename F, int NCOLS, int R>
+template<typename F, int NCOLS, int R, bool DPP = false>
 __launch_bounds__(256)
 __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
                                         float* __restrict__ y, int n_in, int n_out) {
@@ -2394,18 +2412,535 @@ __global__ void native_mmvq_wave_kernel(const typename F::Block* __restrict__ w,
 #pragma unroll
         for (int i = 0; i < R; ++i) {
             float v = tmp[j][i];
+            if constexpr (DPP) {
+                v = g906_wave_sum_dpp(v);
+                if (lane == 63 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
+            } else {
 #pragma unroll
-            for (int off = 32; off > 0; off >>= 1) v += __shfl_xor(v, off, 64);
-            if (lane == 0 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
+                for (int off = 32; off > 0; off >>= 1) v += __shfl_xor(v, off, 64);
+                if (lane == 0 && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = v;
+            }
         }
+}
+// The sum over each LPR-lane group of a wavefront (LPR = 4 .. 64), in lane LPR - 1 of the group (4 to 16: in every
+// lane of it).  The same DPP steps as g906_wave_sum_dpp, stopped at the group's width.
+template<int LPR>
+__device__ __forceinline__ float g906_group_sum_dpp(float v) {
+    static_assert(LPR == 4 || LPR == 8 || LPR == 16 || LPR == 32 || LPR == 64, "a power-of-two group of 4..64 lanes");
+    v += g906_dpp<0xb1, 0xf>(v);
+    v += g906_dpp<0x4e, 0xf>(v);
+    if constexpr (LPR >= 8) v += g906_dpp<0x141, 0xf>(v);
+    if constexpr (LPR >= 16) v += g906_dpp<0x140, 0xf>(v);
+    if constexpr (LPR >= 32) v += g906_dpp<0x142, 0xa>(v);
+    if constexpr (LPR >= 64) v += g906_dpp<0x143, 0xc>(v);
+    return v;
+}
+// lanes a row for the gfx906 lane-group kernels, from the row's task count alone; STRATA_G906_LPR forces one (the bench)
+inline int g906_lpr(int ntask) {
+    static const int env = [] { const char* e = std::getenv("STRATA_G906_LPR"); return e ? std::atoi(e) : 0; }();
+    if (env == 8 || env == 16 || env == 32 || env == 64) return env;
+    // the widest group that divides the tasks and still gives each lane >= 4 (2560 inputs, 40 tasks: 8 x 5; 6144, 96
+    // tasks: 16 x 6 - 32 x 3 lost at T 3-4 in mmvq_bench, 6144 x 2560 Q6_K T 1-4 28.8/35.9/45.0/52.8 us on the wave
+    // kernel -> 27.7/29.4/36.0/48.6 at 16 lanes)
+    for (int l : {64, 32, 16}) if (ntask % l == 0 && ntask / l >= 4) return l;
+    return 8;
+}
+// The lane-group launch of a gfx906 GEMV kernel (LPR from n_in alone, g906_lpr; LPR-row groups, rows a block doubled
+// from one group's worth while >= 256 blocks remain).  By shape: where one group's worth of rows a block still gives
+// >= 128 blocks (mmvq_bench, T 1-4: Q6_K 10240 x 2560 46/92 -> 44/67 us, Q4_K 6144 x 2560 24/47 -> 19/31, IQ4_XS
+// 12288 x 2560 53/91 -> 44/58, Q5_K 10240 x 2560 43/80 -> 36/52; the 640-row shared-expert matrices, 20 blocks, were
+// slower: 8 -> 13 us).  STRATA_G906_LG=0 never, 1 always.
+// STRATA_G906_WIDE=0: rows of 4097..6144 inputs keep the wave kernel
+inline bool g906_wide() {
+    static const bool on = [] { const char* e = std::getenv("STRATA_G906_WIDE"); return !(e && e[0] == '0'); }();
+    return on;
+}
+inline bool g906_lg(int n_in, int n_out) {
+    static const int env = [] { const char* e = std::getenv("STRATA_G906_LG"); return e ? std::atoi(e) : -1; }();
+    if (env >= 0) return env != 0;
+    return n_out / (256 / g906_lpr(4 * (n_in / 256))) >= 128;
+}
+template<typename B> struct G906LG {
+    using K = void (*)(const B*, const Q81Block*, float*, int, int, int);
+    K k8, k16, k32, k64;
+};
+template<int NCOLS, typename B>
+void g906_lg_launch(const G906LG<B>& ks, const B* w, const Q81Block* x, float* y, int n_in, int n_out, std::size_t lds,
+                    cudaStream_t s) {
+    const int lpr = g906_lpr(4 * (n_in / 256)), gpb = 256 / lpr;
+    static const int rpb_env = [] { const char* e = std::getenv("STRATA_G906_LG_RPB"); return e ? std::atoi(e) : 0; }();
+    int rpb = rpb_env > 0 ? rpb_env : gpb;
+    while (rpb_env <= 0 && rpb < 64 && (n_out + 2 * rpb - 1) / (2 * rpb) >= 256) rpb *= 2;
+    const unsigned nb = unsigned((n_out + rpb - 1) / rpb);
+    const auto k = lpr == 8 ? ks.k8 : lpr == 16 ? ks.k16 : lpr == 32 ? ks.k32 : ks.k64;
+    k<<<nb, 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+}
+// ---- gfx906 Q6_K (STRATA_G906_Q6K=0: the wave kernel above).  One wavefront per row; a lane takes 64 weights of one
+// block - 16 consecutive l of one 128-value half n: ql[64n + l .. +16], ql[64n + 32 + l .. +16], qh[32n + l .. +16],
+// three 16-byte loads (gfx906 loads 16 bytes from the blocks' 2-byte alignment) - and unpacks them once for all
+// columns.  Per column it reads the four 16-value activation runs (q8_1 blocks 4n + k, values l .. l + 15) and runs
+// four v_dot4 chains.  Every column's sums are computed the same way whatever NCOLS is (multi_exact holds); the order
+// differs from the wave kernel's, so outputs match it to float rounding, not bitwise.
+typedef int g906_v4 __attribute__((ext_vector_type(4), aligned(2)));
+typedef int g906_v4a __attribute__((ext_vector_type(4), aligned(4)));
+bool g_g906_q6k = !(std::getenv("STRATA_G906_Q6K") && std::string(std::getenv("STRATA_G906_Q6K")) == "0");
+template<int NCOLS, int LPR = 64>
+__launch_bounds__(256)
+__global__ void g906_q6k_kernel(const Q6KBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                int n_in, int n_out, int rows_per_block) {
+    // every column's activations go to LDS once per block of rows: read per row and column from L1 instead, their
+    // scattered 16-byte runs kept gfx906's vector memory unit busy while DRAM idled
+    extern __shared__ int g906_xs[];
+    const int x_stride = n_in / Q8K;
+    {
+        const int words = NCOLS * x_stride * int(sizeof(Q81Block) / 4);
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xs[i] = src[i];
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xs);
+    // LPR lanes a row (64: one wavefront a row), 256 / LPR rows at a time; every group of a wavefront runs the same
+    // passes (its group sums are wavefront-wide DPP), a group past the block's rows with nothing to load
+    constexpr int GPB = 256 / LPR;
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int bpr = n_in / 256;
+    const int row_beg = int(blockIdx.x) * rows_per_block;
+    const int row_end = min(n_out, row_beg + rows_per_block);
+    for (int rb = row_beg; rb < row_end; rb += GPB) {
+        const int row = rb + grp;
+        const bool live = row < row_end;
+        float tmp[NCOLS] = {};
+        for (int t = lane; live && t < 4 * bpr; t += LPR) {
+            const int kb = t >> 2, n = (t >> 1) & 1, l0 = (t & 1) * 16;
+            const Q6KBlock* b = w + std::size_t(row) * bpr + kb;
+            const g906_v4 qa = *reinterpret_cast<const g906_v4*>(b->ql + 64 * n + l0);
+            const g906_v4 qb = *reinterpret_cast<const g906_v4*>(b->ql + 64 * n + 32 + l0);
+            const g906_v4 qh = *reinterpret_cast<const g906_v4*>(b->qh + 32 * n + l0);
+            int sc[4];
+#pragma unroll
+            for (int k = 0; k < 4; ++k) sc[k] = b->scales[8 * n + 2 * k + (t & 1)];
+            const float d = __half2float(b->d);
+            int vi[4][4];   // [k][dword]: the 16 values of run k, as signed bytes q - 32
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int a = qa[i], c = qb[i], h = qh[i];
+                const int v0 = (a & 0x0f0f0f0f) | ((h << 4) & 0x30303030);
+                const int v1 = (c & 0x0f0f0f0f) | ((h << 2) & 0x30303030);
+                const int v2 = ((a >> 4) & 0x0f0f0f0f) | (h & 0x30303030);
+                const int v3 = ((c >> 4) & 0x0f0f0f0f) | ((h >> 2) & 0x30303030);
+                // q - 32 per byte without borrows: q < 64, so (q | 0x80) - 0x20 stays in a byte; ^ 0x80 makes it signed
+                vi[0][i] = ((v0 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+                vi[1][i] = ((v1 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+                vi[2][i] = ((v2 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+                vi[3][i] = ((v3 | int(0x80808080)) - 0x20202020) ^ int(0x80808080);
+            }
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {
+                float sumf = 0.0f;
+#pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    const Q81Block* xb = x + j * x_stride + kb * 8 + 4 * n + k;
+                    const g906_v4a u = *reinterpret_cast<const g906_v4a*>(xb->qs + l0);
+                    int sacc = STRATA_DP4A(vi[k][0], u[0], 0);
+                    sacc = STRATA_DP4A(vi[k][1], u[1], sacc);
+                    sacc = STRATA_DP4A(vi[k][2], u[2], sacc);
+                    sacc = STRATA_DP4A(vi[k][3], u[3], sacc);
+                    sumf += __low2float(xb->ds) * float(sacc * sc[k]);
+                }
+                tmp[j] += d * sumf;
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            const float v = g906_group_sum_dpp<LPR>(tmp[j]);
+            if (live && lane == LPR - 1) y[std::size_t(j) * n_out + row] = v;
+        }
+    }
+}
+// ---- gfx906 Q4_K (STRATA_G906_Q4K=0: the wave kernel).  One wavefront per row; a lane takes one 64-value chunk j of
+// a block (sub-blocks 2j and 2j + 1): the block's 16-byte header (dm and the 12 scale bytes; 144-byte blocks are 16-byte
+// aligned in rows of 2560) and its 32 qs bytes in two 16-byte loads.  The activations and each q8_1 block's integer sum
+// (the sumf_m term of vec_dot_q4_K_q8_1_impl_vmmq, computed once here instead of per row) are staged in LDS.  The same
+// expression per sub-block as q4_q8_dot_impl, summed in another order: rounding-level, columns exact across T.
+bool g_g906_q4k = !(std::getenv("STRATA_G906_Q4K") && std::string(std::getenv("STRATA_G906_Q4K")) == "0");
+template<int NCOLS, int LPR = 64>
+__launch_bounds__(256)
+__global__ void g906_q4k_kernel(const Q4KBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int g906_xs4[];
+    const int x_stride = n_in / Q8K;
+    const int words = NCOLS * x_stride * int(sizeof(Q81Block) / 4);
+    int* isum = g906_xs4 + words;                        // NCOLS * x_stride integer sums
+    {
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xs4[i] = src[i];
+        for (int b = int(threadIdx.x); b < NCOLS * x_stride; b += 256) {
+            const int* q = reinterpret_cast<const int*>(xg[b].qs);
+            int sacc = 0;
+#pragma unroll
+            for (int k = 0; k < 8; ++k) sacc = STRATA_DP4A(0x01010101, q[k], sacc);
+            isum[b] = sacc;
+        }
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xs4);
+    // LPR lanes a row (64: one wavefront a row), 256 / LPR rows at a time; every group of a wavefront runs the same
+    // passes (its group sums are wavefront-wide DPP), a group past the block's rows with nothing to load
+    constexpr int GPB = 256 / LPR;
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int bpr = n_in / 256;
+    const int row_beg = int(blockIdx.x) * rows_per_block;
+    const int row_end = min(n_out, row_beg + rows_per_block);
+    for (int rb = row_beg; rb < row_end; rb += GPB) {
+        const int row = rb + grp;
+        const bool live = row < row_end;
+        float tmp[NCOLS] = {};
+        for (int t = lane; live && t < 4 * bpr; t += LPR) {
+            const int kb = t >> 2, j = t & 3;
+            const Q4KBlock* b = w + std::size_t(row) * bpr + kb;
+            const g906_v4a hdr = *reinterpret_cast<const g906_v4a*>(b);          // dm, scales[0..11]
+            const g906_v4a q0 = *reinterpret_cast<const g906_v4a*>(b->qs + 32 * j);
+            const g906_v4a q1 = *reinterpret_cast<const g906_v4a*>(b->qs + 32 * j + 16);
+            const float2 dm = __half22float2(__builtin_bit_cast(half2, hdr[0]));
+            // scales[0..3] = hdr[1], [4..7] = hdr[2], [8..11] = hdr[3]; bytes taken with shifts (indexing the
+            // register vector's bytes would put it in scratch memory)
+            const unsigned s0 = unsigned(hdr[1]), s1 = unsigned(hdr[2]), s2 = unsigned(hdr[3]);
+            int sc[2], mn[2];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int sb = 2 * j + h, k = sb & 3, sh = 8 * k;
+                const unsigned b0 = (s0 >> sh) & 0xffu, b1 = (s1 >> sh) & 0xffu, b2 = (s2 >> sh) & 0xffu;
+                if (sb < 4) { sc[h] = int(b0 & 63u); mn[h] = int(b1 & 63u); }
+                else {
+                    sc[h] = int((b2 & 0x0fu) | ((b0 >> 6) << 4));
+                    mn[h] = int((b2 >> 4) | ((b1 >> 6) << 4));
+                }
+            }
+            const int qv[8] = {q0[0], q0[1], q0[2], q0[3], q1[0], q1[1], q1[2], q1[3]};
+#pragma unroll
+            for (int c = 0; c < NCOLS; ++c) {
+                float sumf_d = 0.0f, sumf_m = 0.0f;
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {                  // h = 0: low nibbles (sub-block 2j), 1: high (2j + 1)
+                    const int qb = c * x_stride + kb * 8 + 2 * j + h;
+                    const Q81Block* xb = x + qb;
+                    const g906_v4a u0 = *reinterpret_cast<const g906_v4a*>(xb->qs);
+                    const g906_v4a u1 = *reinterpret_cast<const g906_v4a*>(xb->qs + 16);
+                    int dot = 0;
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A((qv[k] >> (4 * h)) & 0x0f0f0f0f, u0[k], dot);
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A((qv[4 + k] >> (4 * h)) & 0x0f0f0f0f, u1[k], dot);
+                    const float d8 = __low2float(xb->ds);
+                    sumf_d += d8 * (dot * sc[h]);
+                    sumf_m += d8 * (isum[qb] * mn[h]);
+                }
+                tmp[c] += dm.x * sumf_d - dm.y * sumf_m;
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float v = g906_group_sum_dpp<LPR>(tmp[c]);
+            if (live && lane == LPR - 1) y[std::size_t(c) * n_out + row] = v;
+        }
+    }
+}
+// ---- gfx906 Q5_K (STRATA_G906_Q5K=0: the wave kernel).  g906_q4k_kernel with the fifth bit: a lane task is a 64-value
+// chunk j (sub-blocks 2j, 2j + 1) - the 16-byte header, its 32 qs bytes and all 32 qh bytes (bit 2j + h of qh[l] is
+// value l's fifth bit in sub-block 2j + h), five 16-byte loads; the activations and their q8_1 integer sums in LDS.
+// Per sub-block q5_q8_dot_impl's integers; float sums in another order (rounding-level), the same for every NCOLS.
+bool g_g906_q5k = !(std::getenv("STRATA_G906_Q5K") && std::string(std::getenv("STRATA_G906_Q5K")) == "0");
+template<int NCOLS, int LPR = 64>
+__launch_bounds__(256)
+__global__ void g906_q5k_kernel(const Q5KBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int g906_xs5[];
+    const int x_stride = n_in / Q8K;
+    const int words = NCOLS * x_stride * int(sizeof(Q81Block) / 4);
+    int* isum = g906_xs5 + words;
+    {
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xs5[i] = src[i];
+        for (int b = int(threadIdx.x); b < NCOLS * x_stride; b += 256) {
+            const int* q = reinterpret_cast<const int*>(xg[b].qs);
+            int sacc = 0;
+#pragma unroll
+            for (int k = 0; k < 8; ++k) sacc = STRATA_DP4A(0x01010101, q[k], sacc);
+            isum[b] = sacc;
+        }
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xs5);
+    constexpr int GPB = 256 / LPR;
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int bpr = n_in / 256;
+    const int row_beg = int(blockIdx.x) * rows_per_block;
+    const int row_end = min(n_out, row_beg + rows_per_block);
+    for (int rb = row_beg; rb < row_end; rb += GPB) {
+        const int row = rb + grp;
+        const bool live = row < row_end;
+        float tmp[NCOLS] = {};
+        for (int t = lane; live && t < 4 * bpr; t += LPR) {
+            const int kb = t >> 2, j = t & 3;
+            const Q5KBlock* b = w + std::size_t(row) * bpr + kb;
+            const g906_v4a hdr = *reinterpret_cast<const g906_v4a*>(b);
+            const g906_v4a q0 = *reinterpret_cast<const g906_v4a*>(b->qs + 32 * j);
+            const g906_v4a q1 = *reinterpret_cast<const g906_v4a*>(b->qs + 32 * j + 16);
+            const g906_v4a h0 = *reinterpret_cast<const g906_v4a*>(b->qh);
+            const g906_v4a h1 = *reinterpret_cast<const g906_v4a*>(b->qh + 16);
+            const float2 dm = __half22float2(__builtin_bit_cast(half2, hdr[0]));
+            const unsigned s0 = unsigned(hdr[1]), s1 = unsigned(hdr[2]), s2 = unsigned(hdr[3]);
+            int sc[2], mn[2];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int sb = 2 * j + h, k = sb & 3, sh = 8 * k;
+                const unsigned b0 = (s0 >> sh) & 0xffu, b1 = (s1 >> sh) & 0xffu, b2 = (s2 >> sh) & 0xffu;
+                if (sb < 4) { sc[h] = int(b0 & 63u); mn[h] = int(b1 & 63u); }
+                else {
+                    sc[h] = int((b2 & 0x0fu) | ((b0 >> 6) << 4));
+                    mn[h] = int((b2 >> 4) | ((b1 >> 6) << 4));
+                }
+            }
+            const int qv[8] = {q0[0], q0[1], q0[2], q0[3], q1[0], q1[1], q1[2], q1[3]};
+            const int hv[8] = {h0[0], h0[1], h0[2], h0[3], h1[0], h1[1], h1[2], h1[3]};
+            int v5[2][8];
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int k = 0; k < 8; ++k)
+                    v5[h][k] = ((qv[k] >> (4 * h)) & 0x0f0f0f0f) | (((hv[k] >> (2 * j + h)) << 4) & 0x10101010);
+#pragma unroll
+            for (int c = 0; c < NCOLS; ++c) {
+                float sumf_d = 0.0f, sumf_m = 0.0f;
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int qb = c * x_stride + kb * 8 + 2 * j + h;
+                    const Q81Block* xb = x + qb;
+                    const g906_v4a u0 = *reinterpret_cast<const g906_v4a*>(xb->qs);
+                    const g906_v4a u1 = *reinterpret_cast<const g906_v4a*>(xb->qs + 16);
+                    int dot = 0;
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A(v5[h][k], u0[k], dot);
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A(v5[h][4 + k], u1[k], dot);
+                    const float d8 = __low2float(xb->ds);
+                    sumf_d += d8 * (dot * sc[h]);
+                    sumf_m += d8 * (isum[qb] * mn[h]);
+                }
+                tmp[c] += dm.x * sumf_d - dm.y * sumf_m;
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float v = g906_group_sum_dpp<LPR>(tmp[c]);
+            if (live && lane == LPR - 1) y[std::size_t(c) * n_out + row] = v;
+        }
+    }
+}
+// ---- gfx906 IQ4_NL (opt-in, STRATA_G906_IQ4NL=1).  A lane task is one 32-value block: its 16 qs bytes in
+// one 16-byte load (2-byte aligned), 8 table lookups (iq4_table_lookup) once for every column, then 8 dp4a a column
+// against the block's activations in LDS.  LPR lanes a row from the row's block count alone (640 inputs: 20 blocks,
+// 4 lanes x 5); the shared expert's down projection (2560 x 640) ran 0.9 MB in ~40-50 us on the wave kernel, 2 of its
+// 64 lanes a block pair busy at a time.  Per block the integer dot is SmallTraits<IQ4NLBlock>'s; the float sums run in
+// another order (rounding-level), the same for every NCOLS.
+bool g_g906_iq4nl = std::getenv("STRATA_G906_IQ4NL") && std::string(std::getenv("STRATA_G906_IQ4NL")) == "1";   // opt-in: mmvq_bench T 1-4 8.5/10.2/13.1/16.0 -> 9.4/11.9/12.0/13.1 us, no net gain at T ~2.4
+template<int NCOLS, int LPR>
+__launch_bounds__(256)
+__global__ void g906_iq4nl_kernel(const IQ4NLBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                  int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int g906_xsnl[];
+    const int nb = n_in / 32;   // q8_1 blocks a column = IQ4_NL blocks a row
+    {
+        const int words = NCOLS * nb * int(sizeof(Q81Block) / 4);
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xsnl[i] = src[i];
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xsnl);
+    constexpr int GPB = 256 / LPR;
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int row_beg = int(blockIdx.x) * rows_per_block;
+    const int row_end = min(n_out, row_beg + rows_per_block);
+    for (int rb = row_beg; rb < row_end; rb += GPB) {
+        const int row = rb + grp;
+        const bool live = row < row_end;
+        float tmp[NCOLS] = {};
+        for (int kb = lane; live && kb < nb; kb += LPR) {
+            const IQ4NLBlock* b = w + std::size_t(row) * nb + kb;
+            const g906_v4 q = *reinterpret_cast<const g906_v4*>(b->qs);
+            const float dw = __half2float(b->d);
+            int2 v[4];
+#pragma unroll
+            for (int i = 0; i < 4; ++i) v[i] = iq4_table_lookup(q[i]);
+#pragma unroll
+            for (int c = 0; c < NCOLS; ++c) {
+                const Q81Block* xb = x + c * nb + kb;
+                const g906_v4a u0 = *reinterpret_cast<const g906_v4a*>(xb->qs);
+                const g906_v4a u1 = *reinterpret_cast<const g906_v4a*>(xb->qs + 16);
+                int sumi = 0;
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    sumi = STRATA_DP4A(v[i].x, u0[i], sumi);
+                    sumi = STRATA_DP4A(v[i].y, u1[i], sumi);
+                }
+                tmp[c] += (dw * __low2float(xb->ds)) * float(sumi);
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float v2 = g906_group_sum_dpp<LPR>(tmp[c]);
+            if (live && lane == LPR - 1) y[std::size_t(c) * n_out + row] = v2;
+        }
+    }
+}
+// ---- gfx906 IQ4_XS (STRATA_G906_IQ4XS=0: the wave kernel).  As g906_q4k_kernel: a lane takes two 32-value sub-blocks
+// (2p, 2p + 1) of a block - its 8-byte header and 32 qs bytes in two 16-byte loads - and looks them up in the IQ4 table
+// once for every column; activations staged in LDS.  Per sub-block the integer dot is IQ4XSTraits::apply's, in its order.
+bool g_g906_iq4xs = !(std::getenv("STRATA_G906_IQ4XS") && std::string(std::getenv("STRATA_G906_IQ4XS")) == "0");
+typedef int g906_v2a __attribute__((ext_vector_type(2), aligned(4)));
+template<int NCOLS, int LPR = 64>
+__launch_bounds__(256)
+__global__ void g906_iq4xs_kernel(const IQ4XSBlock* __restrict__ w, const Q81Block* __restrict__ xg, float* __restrict__ y,
+                                  int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int g906_xsx[];
+    const int x_stride = n_in / Q8K;
+    {
+        const int words = NCOLS * x_stride * int(sizeof(Q81Block) / 4);
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xsx[i] = src[i];
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xsx);
+    // LPR lanes a row (64: one wavefront a row), 256 / LPR rows at a time; every group of a wavefront runs the same
+    // passes (its group sums are wavefront-wide DPP), a group past the block's rows with nothing to load
+    constexpr int GPB = 256 / LPR;
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int bpr = n_in / 256;
+    const int row_beg = int(blockIdx.x) * rows_per_block;
+    const int row_end = min(n_out, row_beg + rows_per_block);
+    for (int rb = row_beg; rb < row_end; rb += GPB) {
+        const int row = rb + grp;
+        const bool live = row < row_end;
+        float tmp[NCOLS] = {};
+        for (int t = lane; live && t < 4 * bpr; t += LPR) {
+            const int kb = t >> 2, pp = t & 3;
+            const IQ4XSBlock* b = w + std::size_t(row) * bpr + kb;
+            const g906_v2a hdr = *reinterpret_cast<const g906_v2a*>(b);         // d | scales_h << 16, scales_l[0..3]
+            const g906_v4 q0 = *reinterpret_cast<const g906_v4*>(b->qs + 32 * pp);
+            const g906_v4 q1 = *reinterpret_cast<const g906_v4*>(b->qs + 32 * pp + 16);
+            const float dw = __half2float(__builtin_bit_cast(half, (unsigned short) (unsigned(hdr[0]) & 0xffffu)));
+            const unsigned sh = unsigned(hdr[0]) >> 16, sl = (unsigned(hdr[1]) >> (8 * pp)) & 0xffu;
+            int ls[2];
+            int2 v[2][4];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int ib = 2 * pp + h;
+                ls[h] = int(((sl >> (4 * h)) & 0x0fu) | (((sh >> (2 * ib)) & 0x03u) << 4)) - 32;
+            }
+#pragma unroll
+            for (int j = 0; j < 4; ++j) { v[0][j] = iq4_table_lookup(q0[j]); v[1][j] = iq4_table_lookup(q1[j]); }
+#pragma unroll
+            for (int c = 0; c < NCOLS; ++c) {
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const Q81Block* xb = x + c * x_stride + kb * 8 + 2 * pp + h;
+                    const g906_v4a ua = *reinterpret_cast<const g906_v4a*>(xb->qs);
+                    const g906_v4a ub = *reinterpret_cast<const g906_v4a*>(xb->qs + 16);
+                    int sumi = 0;
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        sumi = STRATA_DP4A(v[h][j].x, ua[j], sumi);
+                        sumi = STRATA_DP4A(v[h][j].y, ub[j], sumi);
+                    }
+                    sumi *= ls[h];
+                    tmp[c] += (dw * __low2float(xb->ds)) * sumi;
+                }
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float v2 = g906_group_sum_dpp<LPR>(tmp[c]);
+            if (live && lane == LPR - 1) y[std::size_t(c) * n_out + row] = v2;
+        }
+    }
 }
 template<typename F, int NCOLS>
 void wave_launch_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
     const auto* w = static_cast<const typename F::Block*>(weights);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    if constexpr (std::is_same_v<F, Q6KTraits>) {
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
+        // by shape only, never by column count (a column's sums must not depend on how many columns ride along): past 4096
+        // inputs the wave kernel is as fast on average (it wins at T >= 3, this one at T <= 2)
+        // up to 6144 inputs (ssm_out / attn_output) where the widest window's activations fit LDS: decided by shape
+        // alone (the lds of STRATA_VERIFY_MAX_T columns), never by this call's column count
+        const std::size_t lds_max = std::size_t(STRATA_VERIFY_MAX_T) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
+        if (g_g906_q6k && ((lds <= 49152 && n_in <= 4096) || (g906_wide() && n_in <= 6144 && lds_max <= 65536))) {
+            static const int rpb_env = [] { const char* e = std::getenv("STRATA_G906_RPB"); return e ? std::atoi(e) : 0; }();
+            if (g906_lg(n_in, n_out)) { g906_lg_launch<NCOLS>(G906LG<Q6KBlock>{g906_q6k_kernel<NCOLS, 8>, g906_q6k_kernel<NCOLS, 16>, g906_q6k_kernel<NCOLS, 32>, g906_q6k_kernel<NCOLS, 64>}, w, x, y, n_in, n_out, lds, s); return; }
+            int rpb = rpb_env > 0 ? rpb_env : (n_out / 256) & ~3;
+            rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
+            g906_q6k_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+            return;
+        }
+    }
+    if constexpr (std::is_same_v<F, Q4KTraits>) {
+        // shape only (never the column count): rows of up to 4096 inputs, so every column count fits LDS
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
+        const std::size_t lds_max = std::size_t(STRATA_VERIFY_MAX_T) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
+        if (g_g906_q4k && ((n_in <= 4096 && lds <= 65536) || (g906_wide() && n_in <= 6144 && lds_max <= 65536))) {
+            if (g906_lg(n_in, n_out)) { g906_lg_launch<NCOLS>(G906LG<Q4KBlock>{g906_q4k_kernel<NCOLS, 8>, g906_q4k_kernel<NCOLS, 16>, g906_q4k_kernel<NCOLS, 32>, g906_q4k_kernel<NCOLS, 64>}, w, x, y, n_in, n_out, lds, s); return; }
+            static const int rpb4_env = [] { const char* e = std::getenv("STRATA_G906_Q4K_RPB"); return e ? std::atoi(e) : 0; }();
+            int rpb = rpb4_env > 0 ? rpb4_env : (n_out / 256) & ~3;
+            rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
+            g906_q4k_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+            return;
+        }
+    }
+    if constexpr (std::is_same_v<F, Q5KTraits>) {   // shape only, as Q4_K
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
+        const std::size_t lds_max = std::size_t(STRATA_VERIFY_MAX_T) * std::size_t(n_in / Q8K) * (sizeof(Q81Block) + 4);
+        if (g_g906_q5k && ((n_in <= 4096 && lds <= 65536) || (g906_wide() && n_in <= 6144 && lds_max <= 65536))) {
+            if (g906_lg(n_in, n_out)) { g906_lg_launch<NCOLS>(G906LG<Q5KBlock>{g906_q5k_kernel<NCOLS, 8>, g906_q5k_kernel<NCOLS, 16>, g906_q5k_kernel<NCOLS, 32>, g906_q5k_kernel<NCOLS, 64>}, w, x, y, n_in, n_out, lds, s); return; }
+            int rpb = (n_out / 256) & ~3;
+            rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
+            g906_q5k_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+            return;
+        }
+    }
+    if constexpr (std::is_same_v<F, IQ4XSTraits>) {
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / Q8K) * sizeof(Q81Block);
+        if (g_g906_iq4xs && n_in <= 4096 && lds <= 65536) {   // shape only, as Q4_K
+            if (g906_lg(n_in, n_out)) { g906_lg_launch<NCOLS>(G906LG<IQ4XSBlock>{g906_iq4xs_kernel<NCOLS, 8>, g906_iq4xs_kernel<NCOLS, 16>, g906_iq4xs_kernel<NCOLS, 32>, g906_iq4xs_kernel<NCOLS, 64>}, w, x, y, n_in, n_out, lds, s); return; }
+            int rpb = (n_out / 256) & ~3;
+            rpb = rpb < 4 ? 4 : rpb > 64 ? 64 : rpb;
+            g906_iq4xs_kernel<NCOLS><<<unsigned((n_out + rpb - 1) / rpb), 256, lds, s>>>(w, x, y, n_in, n_out, rpb);
+            return;
+        }
+    }
+    if constexpr (std::is_same_v<F, SmallTraits<IQ4NLBlock, 4>>) {
+        const std::size_t lds = std::size_t(NCOLS) * std::size_t(n_in / 32) * sizeof(Q81Block);
+        if (g_g906_iq4nl && n_in <= 4096 && lds <= 65536) {   // shape only
+            const int nb = n_in / 32;
+            int lpr = 64;   // the narrowest group whose lanes take at most 8 blocks each, all busy where possible
+            for (int l : {4, 8, 16, 32, 64}) if (nb % l == 0 && nb / l <= 8) { lpr = l; break; }
+            if (lpr == 64) for (int l : {4, 8, 16, 32}) if ((nb + l - 1) / l <= 8) { lpr = l; break; }
+            const int rpb = 256 / lpr;
+            const unsigned nbk = unsigned((n_out + rpb - 1) / rpb);
+            switch (lpr) {
+                case 4: g906_iq4nl_kernel<NCOLS, 4><<<nbk, 256, lds, s>>>(w, x, y, n_in, n_out, rpb); break;
+                case 8: g906_iq4nl_kernel<NCOLS, 8><<<nbk, 256, lds, s>>>(w, x, y, n_in, n_out, rpb); break;
+                case 16: g906_iq4nl_kernel<NCOLS, 16><<<nbk, 256, lds, s>>>(w, x, y, n_in, n_out, rpb); break;
+                case 32: g906_iq4nl_kernel<NCOLS, 32><<<nbk, 256, lds, s>>>(w, x, y, n_in, n_out, rpb); break;
+                default: g906_iq4nl_kernel<NCOLS, 64><<<nbk, 256, lds, s>>>(w, x, y, n_in, n_out, rpb); break;
+            }
+            return;
+        }
+    }
     constexpr int R = 1;
     const unsigned blocks = unsigned((std::size_t(n_out) + 4 * R - 1) / (4 * R));
-    native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+    if (g_g906_dpp) native_mmvq_wave_kernel<F, NCOLS, R, true><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
+    else native_mmvq_wave_kernel<F, NCOLS, R><<<blocks, 256, 0, s>>>(w, x, y, n_in, n_out);
 }
 template<typename F>
 void wave_launch(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {

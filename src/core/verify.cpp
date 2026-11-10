@@ -210,7 +210,7 @@ inline int64_t select_long_at() {
 }
 // 143-amdk: STRATA_QFUSE_HC - only the hyper-connection read writes its consumer's q8_1 image (not the GDN recurrence): gfx12 default (=0 / 1 forces off / on)
 inline bool g_qfuse_hc() {
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906: the same switches (its arch table, arch_defaults.cpp)
     static const bool on = [] {
         const char* v = std::getenv("STRATA_QFUSE_HC");
         if (v != nullptr) return std::atoi(v) != 0;
@@ -431,7 +431,7 @@ bool device_is_sm75() {
 }
 
 bool fuse_wait_on() {
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906: the same switches (its arch table, arch_defaults.cpp)
     static const int env = [] {
         const char* v = std::getenv("STRATA_FUSE_WAIT");
         return v != nullptr ? (std::atoi(v) != 0 ? 1 : 0) : -1;
@@ -456,7 +456,7 @@ bool fuse_wait_on() {
 }
 // 143-amdk's rows version of the folded wait (copy_rows_from_mapped_after): HIP with fuse_wait_on, CUDA STRATA_FUSE_WAIT=1
 bool fuse_rows_on() {
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906: the same switches (its arch table, arch_defaults.cpp)
     return fuse_wait_on();
 #else
     static const bool on = [] { const char* v = std::getenv("STRATA_FUSE_WAIT"); return v != nullptr && std::atoi(v) == 1; }();
@@ -466,7 +466,7 @@ bool fuse_rows_on() {
 
 // 143-amdk: STRATA_FUSE_CONVAB=1 - the GDN conv and the a/b projections in one launch.  Opt-in: measured -0.3% on gfx1201 (the a/b dot chain is the longer one).
 bool fuse_convab_on() {
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906: the same switches (its arch table, arch_defaults.cpp)
     static const bool on = [] { const char* v = std::getenv("STRATA_FUSE_CONVAB"); return v != nullptr && std::atoi(v) != 0; }();
     return on;
 #else
@@ -476,7 +476,7 @@ bool fuse_convab_on() {
 
 // 143-amdk: STRATA_FUSE_HITS - moe_hit_add folded into the combine (gfx12 default; =0 / 1 forces off / on)
 bool fuse_hits_on() {
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)   // gfx906: the same switches (its arch table, arch_defaults.cpp)
     static const int env = [] { const char* v = std::getenv("STRATA_FUSE_HITS"); return v != nullptr ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
     if (env >= 0) return env != 0;
     static int per_dev[64];   // 0 unknown, 1 no, 2 yes
