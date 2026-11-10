@@ -49,7 +49,12 @@ explains it: the time is spread over about 35 launches per layer, most of them w
 | + two-kernel hyper-connection read (no norm launch) | 41.7 | ~46 tok/s | |
 | + Q4_K and IQ4_XS kernels, IQ3_XXS sign unpack | 41.2 | 46.5 tok/s | 95.20 %, KL 0.0216, PPL 4.094 (0.1.59.8) |
 | + expert mode 9, one-token router via the rows kernel, QSA merge v2 (all bitwise) | 39.7 | 48.9 tok/s | bitwise 0.1.59.8 (0.1.59.9) |
-| + lane-group GEMV rows, Q5_K kernel | **37.3** | **50.9 tok/s** | 94.87 %, KL 0.0239, PPL 4.107 (0.1.59.10) |
+| + lane-group GEMV rows, Q5_K kernel | 37.3 | 50.9 tok/s | 94.87 %, KL 0.0239, PPL 4.107 (0.1.59.10) |
+| 0.1.59.10 with the shader clock on `auto` (was pinned `low`) | 27.3 | 70.9 tok/s | (same engine) |
+| + 6144-input rows on the gfx906 kernels, IQ4_NL expert down kernel (`auto` clock) | **26.2** | **74.5 tok/s** | 94.69 %, KL 0.0255, PPL 4.097 (0.1.59.11; with STRATA_G906_DOWN=0: 95.14 %, 0.0215, 4.135) |
+
+The quality gate's noise, from the summation-order variants so far: top-1 94.7-95.2 %, KL 0.021-0.026, PPL
+4.03-4.14, with KL and PPL often moving in opposite directions - a single run inside that envelope is a pass.
 
 What did not pay: LDS staging alone on the CUDA-shaped kernels (the weight loads, not the activations, bound
 them), more rows per wavefront, a software prefetch that doubled the registers (two waves a SIMD), the existing
@@ -76,8 +81,13 @@ router 8 %, sync 6.5 %, attention 5 %):
 **Clock note**: `/etc/udev/rules.d/30-amdgpu-pm.rules` sets `power_dpm_force_performance_level=low` on both cards,
 which pins the shader clock at 999 MHz (the card boosts to 1730 MHz).  All numbers here are at that setting.
 
-Still to do: Q6_K / Q4_K with 6144 inputs (`ssm_out`, `attn_output`: wave kernel, 166 GB/s at T 4), the experts'
-occupancy (VGPRs 76-97), the hyper-connection kernels' scaling with T, the LM head at T > 1.
+At `auto` clocks each GPU is busy ~70-77 % of a steady decode: the rest is the window's cross-GPU and host round
+trip, not kernel time.  The drafter's LM head (106K x 2560 Q6_K, 340 us a window) already reads at ~85 % of the
+read roofline.
+
+Still to do: the experts' occupancy (VGPRs 76-97, ~350 GB/s), the Q2_0 expert down (same lane waste as IQ4_NL had),
+the hyper-connection kernels' scaling with T (down 15 -> 37 us from T 1 to 4; rows a block re-swept, 16 stays best),
+the window's host/cross-GPU idle.
 
 Next, by the trace (rocprofv3 --kernel-trace on a live serve; the engine must get SIGINT itself to write it):
 expert gate/up and down (~4 s of 26 s traced, ALU-bound grid lookups), QSA `attn_merge` (87 us on 24 blocks),
