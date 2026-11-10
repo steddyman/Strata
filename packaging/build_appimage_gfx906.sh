@@ -94,7 +94,8 @@ npm ci --no-audit --no-fund >/dev/null
 APPIMAGE_EXTRACT_AND_RUN=1 NO_STRIP=1 npx tauri build --bundles appimage --config src-tauri/tauri.gfx906.conf.json
 VER=$(node -p 'require("./package.json").version')
 BUILT=$(ls -t src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
-OUTFILE="$WORK/Strata-$VER-gfx906-linux-x86_64.AppImage"
+# OUTFILE: another name when the default one is running (Linux will not overwrite a running AppImage: "Text file busy")
+OUTFILE=${OUTFILE:-$WORK/Strata-$VER-gfx906-linux-x86_64.AppImage}
 say "repack (the staged payloads byte for byte)"
 APPIMAGE_EXTRACT_AND_RUN=1 bash scripts/repack-appimage.sh "$BUILT" "$OUTFILE"
 APPIMAGE_EXTRACT_AND_RUN=1 bash scripts/repack-appimage.sh "$OUTFILE" "" --check
