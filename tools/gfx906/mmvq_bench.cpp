@@ -7,7 +7,10 @@
 #include <random>
 #include <string>
 #include "strata/kernels/native_mmvq.hpp"
+#include "strata/kernels/iq_kernels.hpp"
 using namespace strata::kernels;
+static void iq3s_mmvq(const void* w, const void* x, float* y, int n_in, int n_out, int nc, void* s) { iq_mmvq(21, w, x, y, n_in, n_out, nc, s); }
+static void iq2xs_mmvq(const void* w, const void* x, float* y, int n_in, int n_out, int nc, void* s) { iq_mmvq(17, w, x, y, n_in, n_out, nc, s); }
 #define CK(x) do { hipError_t e = (x); if (e != hipSuccess) { std::printf("%s: %s\n", #x, hipGetErrorString(e)); std::exit(1); } } while (0)
 using Fn = void (*)(const void*, const void*, float*, int, int, int, void*);
 struct Fmt { const char* name; Fn fn; int bpb; int epb; std::vector<int> scale_offs; };
@@ -20,11 +23,11 @@ __global__ void read_kernel(const uint4* p, size_t n, float* out) {
 
 int main(int argc, char** argv) {
     int iters = 200;
-    FILE* dump = argc > 1 ? std::fopen(argv[1], "wb") : nullptr;
+    FILE* dump = argc > 1 && std::strcmp(argv[1], "-") ? std::fopen(argv[1], "wb") : nullptr;
     hipStream_t s; CK(hipStreamCreate(&s));
     hipEvent_t a, b; CK(hipEventCreate(&a)); CK(hipEventCreate(&b));
     float* dummy; CK(hipMalloc(&dummy, 4));
-    { // the read roofline
+    if (!std::getenv("MB_ROOF")) {} else { // the read roofline (MB_ROOF=1)
         size_t bytes = size_t(1) << 30; uint4* p; CK(hipMalloc(&p, bytes)); CK(hipMemset(p, 1, bytes));
         for (int w = 0; w < 3; ++w) read_kernel<<<64 * 40, 256, 0, s>>>(p, bytes / 16, dummy);
         CK(hipEventRecord(a, s)); for (int i = 0; i < 20; ++i) read_kernel<<<64 * 40, 256, 0, s>>>(p, bytes / 16, dummy);
@@ -38,6 +41,11 @@ int main(int argc, char** argv) {
         {"IQ4_NL", native_iq4_nl_mmvq, 18, 32, {0}},
         {"Q5_K", native_q5_k_mmvq, 176, 256, {0, 2}},
         {"Q4_0", native_q4_0_mmvq, 18, 32, {0}},
+        {"Q3_K", native_q3_k_mmvq, 110, 256, {108}},
+        {"Q2_0", native_q2_0_mmvq, 18, 64, {0}},
+        {"Q5_0", native_q5_0_mmvq, 22, 32, {0}},
+        {"Q8_0", native_q8_0_mmvq, 34, 32, {0}},
+        {"IQ3_S", iq3s_mmvq, 110, 256, {0}},
     };
     struct Case { const char* what; const char* fmt; int n_in, n_out; };
     std::vector<Case> cases = {
@@ -45,7 +53,13 @@ int main(int argc, char** argv) {
         {"GDN qkv", "Q6_K", 2560, 10240}, {"GDN out", "Q6_K", 6144, 2560}, {"GDN z", "Q4_K", 2560, 6144},
         {"QSA out", "Q4_K", 6144, 2560}, {"QSA q", "IQ4_XS", 2560, 12288}, {"shexp dn", "IQ4_NL", 640, 2560}, {"shexp gate", "Q4_K", 2560, 640},
         {"GDN qkv5", "Q5_K", 2560, 10240}, {"shexp q6", "Q6_K", 2560, 640}, {"shexp xs", "IQ4_XS", 2560, 640},
+        {"qkv q3k", "Q3_K", 2560, 10240}, {"gate q3k", "Q3_K", 2560, 6144}, {"out q3k", "Q3_K", 6144, 2560}, {"shexp q3k", "Q3_K", 2560, 640},
+        {"shexp q2", "Q2_0", 2560, 640}, {"shdn q2", "Q2_0", 640, 2560}, {"qkv q2", "Q2_0", 2560, 10240},
+        {"shdn q4_0", "Q4_0", 640, 2560}, {"shdn q5_0", "Q5_0", 640, 2560}, {"shdn q8_0", "Q8_0", 640, 2560},
+        {"gate iq3s", "IQ3_S", 2560, 6144}, {"out iq3s", "IQ3_S", 6144, 2560}, {"shexp iq3s", "IQ3_S", 2560, 640}, {"qkv iq3s", "IQ3_S", 2560, 10240},
     };
+    // argv[2]: only the cases whose name or format contains it
+    if (argc > 2) { std::vector<Case> k; for (auto& c : cases) if (std::strstr(c.what, argv[2]) || std::strstr(c.fmt, argv[2])) k.push_back(c); cases = k; }
     std::mt19937 rng(1);
     for (auto& c : cases) {
         const Fmt* f = nullptr; for (auto& x : fmts) if (!std::strcmp(x.name, c.fmt)) f = &x;
