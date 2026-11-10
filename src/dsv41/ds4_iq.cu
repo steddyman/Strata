@@ -103,8 +103,16 @@ __device__ __forceinline__ uint32_t ksigns8(uint32_t v) {
 // SIMD byte instructions (__vcmpne4 / __vsub4) are emulated (Volta, RDNA): every grid byte is nonzero and <= 62, so
 // (g ^ 0xff) + 1 = -g in each byte with no carry into the next
 __device__ __forceinline__ int sgn4(uint32_t g, uint32_t b) {
+#if defined(STRATA_HIP_GFX906)
+    // gfx906: the 32-bit multiplies are quarter rate there; the nibble spread by v_mul_u32_u24 (full rate) and the 0x00 / 0xff
+    // byte mask by v_perm_b32 (selector 0x0c -> 0x00, 0x0d -> 0xff) - the same lo and mask, so the same word (the Qwen engine's g9_swn)
+    const uint32_t lo = __umul24(b & 15u, 0x204081u) & 0x01010101u;
+    const uint32_t m = __builtin_amdgcn_perm(0u, 0u, lo | 0x0C0C0C0Cu);
+    return (int) ((g ^ m) + lo);
+#else
     const uint32_t lo = (((b & 15u) * 0x10204080u) & 0x80808080u) >> 7;
     return (int) ((g ^ (lo * 255u)) + lo);
+#endif
 }
 __device__ __forceinline__ int2 tab16(uint32_t q4, const uint32_t* t) {   // vecdotq's get_int_from_table_16
     uint32_t tmp[2];
@@ -121,8 +129,14 @@ __device__ __forceinline__ int2 tab16(uint32_t q4, const uint32_t* t) {   // vec
 // values as int8 codes 8 (n - 1) + 1, or - 1 when the group's delta is negative: ggml's weight dl ((n - 1) +- 0.125), whose
 // dl (2 sc + 1) / 8 is this kernel's per-sub-block scale, is then d * (s0 lo + s1 hi) exactly
 __device__ __forceinline__ uint32_t iq1_codes(uint32_t n, bool neg) {
+#if defined(STRATA_HIP_GFX906)
+    // gfx906 (no byte SIMD: __vsub4 is ~12 word ops): the grid nibbles are 0..2, so each byte's code is one of three - v_perm_b32
+    // picks it from a 3-byte table, {-7, 1, 9} or {-9, -1, 7}: the same bytes as the subtractions below
+    return __builtin_amdgcn_perm(0u, neg ? 0x0007FFF7u : 0x000901F9u, n);
+#else
     const uint32_t c = (uint32_t) __vsub4((int) (n * 8u), 0x07070707);   // (n * 8 - 7) in each byte: no carry (n <= 15)
     return neg ? (uint32_t) __vsub4((int) c, 0x02020202) : c;
+#endif
 }
 // IQ1_M has no d field: its F16 scale is the top nibbles of its four u16 scales (ggml's dequantize_row_iq1_m)
 __device__ __forceinline__ uint16_t iq1m_d(const uint8_t* b) {
