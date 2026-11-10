@@ -938,6 +938,170 @@ __global__ void __launch_bounds__(kThreads) mv_kernel(const Jobs J) {
         }
 }
 
+#if defined(STRATA_HIP_GFX906)
+// ---- gfx906 (Vega 20, wave64): the Q5_K GEMV as the Qwen engine's g906_q5k_kernel (src/kernels/cuda/native_mmvq.cu).
+// A lane task is a 64-value chunk j of a block (sub-blocks 2j, 2j + 1): the 16-byte header, its 32 qs bytes and the 32 qh
+// bytes in five 16-byte loads, decoded once for every column; LPR lanes a row (from k alone), the row's sum across them by
+// DPP.  The columns' int8 activations, their scales and each 16-value half's integer sum are staged in LDS once a block.
+// Each 32-value term is sub_dot<kQ5_K>'s exact F32 expression and goes into the lane's sum by the same fmaf; only the order
+// of the lanes' sums differs from mv_kernel (rounding-level).  Columns run in launches of at most 4 (the same code for a
+// column whatever the call's column count).  DS4_G906_Q5K=0 keeps mv_kernel.
+typedef int g906_v4a __attribute__((ext_vector_type(4), aligned(4)));
+template <unsigned CTRL, unsigned ROW_MASK>
+__device__ __forceinline__ float g906_dpp(float v) {
+    return __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(v), CTRL, ROW_MASK, 0xf, false));
+}
+template <int LPR>
+__device__ __forceinline__ float g906_group_sum_dpp(float v) {   // the sum of each LPR-lane group, in its lane LPR - 1
+    v += g906_dpp<0xb1, 0xf>(v);
+    v += g906_dpp<0x4e, 0xf>(v);
+    if constexpr (LPR >= 8) v += g906_dpp<0x141, 0xf>(v);
+    if constexpr (LPR >= 16) v += g906_dpp<0x140, 0xf>(v);
+    if constexpr (LPR >= 32) v += g906_dpp<0x142, 0xa>(v);
+    if constexpr (LPR >= 64) v += g906_dpp<0x143, 0xc>(v);
+    return v;
+}
+inline int g906_lpr(int ntask) {
+    for (int l : {64, 32, 16}) if (ntask % l == 0 && ntask / l >= 4) return l;
+    for (int l : {8, 4}) if (ntask % l == 0) return l;
+    return 8;
+}
+inline bool g906_q5k_on() {
+    static const bool on = [] { const char* e = std::getenv("DS4_G906_Q5K"); return !(e && e[0] == '0'); }();
+    return on;
+}
+template <int NC, int LPR>
+__global__ void __launch_bounds__(256) g906_q5k_mv_kernel(const Jobs J, int rpb) {
+    extern __shared__ int g906_sm[];
+    const MvJob& b = J.j[blockIdx.y];
+    const int k = b.k, nsb = k / 32, nc = min(NC, b.ncol);
+    int8_t* xs = (int8_t*) g906_sm;                       // NC k int8
+    float* xds = (float*) (xs + (size_t) NC * k);          // NC nsb scales
+    int* hs = (int*) (xds + (size_t) NC * nsb);           // NC nsb x 2 half sums
+    for (int c = 0; c < nc; ++c) {
+        const int4* src = (const int4*) (b.xq + (size_t) c * k);
+        int4* dst = (int4*) (xs + (size_t) c * k);
+        for (int i = threadIdx.x; i < k / 16; i += 256) dst[i] = src[i];
+        for (int i = threadIdx.x; i < nsb; i += 256) {
+            xds[c * nsb + i] = b.xd[(size_t) c * nsb + i];
+            const int4 xa = src[2 * i], xb = src[2 * i + 1];
+            int sl = __dp4a(0x01010101, xa.x, 0);
+            sl = __dp4a(0x01010101, xa.y, sl);
+            sl = __dp4a(0x01010101, xa.z, sl);
+            sl = __dp4a(0x01010101, xa.w, sl);
+            int sh = __dp4a(0x01010101, xb.x, 0);
+            sh = __dp4a(0x01010101, xb.y, sh);
+            sh = __dp4a(0x01010101, xb.z, sh);
+            sh = __dp4a(0x01010101, xb.w, sh);
+            hs[2 * (c * nsb + i)] = sl;
+            hs[2 * (c * nsb + i) + 1] = sh;
+        }
+    }
+    __syncthreads();
+    constexpr int GPB = 256 / LPR;
+    const int lane = threadIdx.x % LPR, grp = threadIdx.x / LPR;
+    const int bpr = k / 256;
+    const int row_beg = blockIdx.x * rpb, row_end = min(b.n, row_beg + rpb);
+    for (int rb = row_beg; rb < row_end; rb += GPB) {
+        const int row = rb + grp;
+        const bool live = row < row_end;
+        float tmp[NC];
+#pragma unroll
+        for (int c = 0; c < NC; ++c) tmp[c] = 0.0f;
+        for (int t = lane; live && t < 4 * bpr; t += LPR) {
+            const int kb = t >> 2, j = t & 3;
+            const uint8_t* blk = b.w + (size_t) row * b.ld + (size_t) kb * Ty<kQ5_K>::B;
+            const g906_v4a hdr = *(const g906_v4a*) blk;
+            const g906_v4a q0 = *(const g906_v4a*) (blk + 48 + 32 * j);
+            const g906_v4a q1 = *(const g906_v4a*) (blk + 48 + 32 * j + 16);
+            const g906_v4a h0 = *(const g906_v4a*) (blk + 16);
+            const g906_v4a h1 = *(const g906_v4a*) (blk + 32);
+            const float d = __half2float(__ushort_as_half((unsigned short) ((unsigned) hdr[0] & 0xffffu)));
+            const float dmin = __half2float(__ushort_as_half((unsigned short) ((unsigned) hdr[0] >> 16)));
+            const unsigned s0 = (unsigned) hdr[1], s1 = (unsigned) hdr[2], s2 = (unsigned) hdr[3];
+            int sc[2], mn[2];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {   // q4k_scale's 6-bit scale and min of sub-block 2j + h
+                const int sb = 2 * j + h, sh = 8 * (sb & 3);
+                const unsigned b0 = (s0 >> sh) & 0xffu, b1 = (s1 >> sh) & 0xffu, b2 = (s2 >> sh) & 0xffu;
+                if (sb < 4) { sc[h] = (int) (b0 & 63u); mn[h] = (int) (b1 & 63u); }
+                else {
+                    sc[h] = (int) ((b2 & 0x0fu) | ((b0 >> 6) << 4));
+                    mn[h] = (int) ((b2 >> 4) | ((b1 >> 6) << 4));
+                }
+            }
+            const int qv[8] = {q0[0], q0[1], q0[2], q0[3], q1[0], q1[1], q1[2], q1[3]};
+            const int hv[8] = {h0[0], h0[1], h0[2], h0[3], h1[0], h1[1], h1[2], h1[3]};
+            int v5[2][8];
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int q = 0; q < 8; ++q)
+                    v5[h][q] = (int) ((((unsigned) qv[q] >> (4 * h)) & 0x0f0f0f0fu) | ((((unsigned) hv[q] >> (2 * j + h)) & 0x01010101u) << 4));
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int ib = kb * 8 + 2 * j + h;
+                const float m0 = dmin * (float) mn[h];
+#pragma unroll
+                for (int c = 0; c < NC; ++c) {
+                    if (c >= nc) break;
+                    const g906_v4a* xp = (const g906_v4a*) (xs + (size_t) c * k + (size_t) ib * 32);
+                    const g906_v4a xa = xp[0], xb = xp[1];
+                    int lo = __dp4a(v5[h][0], xa[0], 0);
+                    lo = __dp4a(v5[h][1], xa[1], lo);
+                    lo = __dp4a(v5[h][2], xa[2], lo);
+                    lo = __dp4a(v5[h][3], xa[3], lo);
+                    int hi = __dp4a(v5[h][4], xb[0], 0);
+                    hi = __dp4a(v5[h][5], xb[1], hi);
+                    hi = __dp4a(v5[h][6], xb[2], hi);
+                    hi = __dp4a(v5[h][7], xb[3], hi);
+                    float v = __fmul_rn(d, (float) (sc[h] * lo + sc[h] * hi));
+                    const int sl = hs[2 * (c * nsb + ib)], shs = hs[2 * (c * nsb + ib) + 1];
+                    v = __fsub_rn(v, __fadd_rn(__fmul_rn(m0, (float) sl), __fmul_rn(m0, (float) shs)));
+                    tmp[c] = fmaf(xds[c * nsb + ib], v, tmp[c]);
+                }
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            const float v = g906_group_sum_dpp<LPR>(tmp[c]);
+            if (live && c < nc && lane == LPR - 1) b.y[c * b.ycs + row] = b.alpha * v + (b.bias != nullptr ? b.bias[row] : 0.0f);
+        }
+    }
+}
+// by shape only (the jobs' k; never the column count): true = launched
+static bool g906_q5k_mv(const Jobs& J, int nj, int max_n, int max_c, cudaStream_t s) {
+    if (!g906_q5k_on() || nj <= 0) return false;
+    const int k = J.j[0].k;
+    for (int j = 0; j < nj; ++j) if (J.j[j].k != k || J.j[j].ld != (size_t) (k / 256) * Ty<kQ5_K>::B) return false;
+    if (k % 256 != 0 || k > 8192) return false;
+    const int lpr = g906_lpr(k / 64), gpb = 256 / lpr;
+    int rpb = gpb;
+    while (rpb < 64 && (max_n + 2 * rpb - 1) / (2 * rpb) * nj >= 256) rpb *= 2;
+    const dim3 grid((unsigned) ((max_n + rpb - 1) / rpb), (unsigned) nj);
+    for (int c0 = 0; c0 < std::max(1, max_c); c0 += 4) {
+        Jobs K = J;
+        for (int j = 0; j < nj; ++j) {
+            MvJob& b = K.j[j];
+            const int nsb = b.k / 32;
+            b.ncol = std::max(0, std::min(4, J.j[j].ncol - c0));
+            b.xq += (size_t) c0 * b.k;
+            b.xd += (size_t) c0 * nsb;
+            b.y += (size_t) c0 * b.ycs;
+        }
+        const bool one = max_c <= 1;
+        const size_t lds = (size_t) (one ? 1 : 4) * ((size_t) k + (size_t) (k / 32) * 12);   // int8 x, F32 scales, 2 int half sums
+#define G9Q5(NC_, L_) strata_ds4_launch(g906_q5k_mv_kernel<NC_, L_>, grid, 256, lds, s, K, rpb)
+#define G9Q5L(NC_) switch (lpr) { case 4: G9Q5(NC_, 4); break; case 8: G9Q5(NC_, 8); break; case 16: G9Q5(NC_, 16); break; \
+                                  case 32: G9Q5(NC_, 32); break; default: G9Q5(NC_, 64); break; }
+        if (one) { G9Q5L(1) } else { G9Q5L(4) }
+#undef G9Q5L
+#undef G9Q5
+    }
+    return true;
+}
+#endif
+
 // ---------------------------------------------------------------- the prompt sets' light experts
 // A set's experts of a few rows (<= kLightRows: a prompt of a few hundred tokens spreads ~10 over most of 384 experts)
 // in the token kernels' form: each weight sub-block decoded once and dotted with every row's int8 input (rounded per 32
@@ -1298,6 +1462,10 @@ void mv_nc(const Jobs& J, int nj, int max_n, int max_c, cudaStream_t s) {
         }
         return;
     }
+#endif
+#if defined(STRATA_HIP_GFX906)
+    if constexpr (T == kQ5_K)
+        if (g906_q5k_mv(J, nj, max_n, max_c, s)) return;
 #endif
     if (max_c <= 1) strata_ds4_launch(mv_kernel<T, 1>, grid, kThreads, 0, s, J);
     else if (max_c <= 4) strata_ds4_launch(mv_kernel<T, 4>, grid, kThreads, 0, s, J);
