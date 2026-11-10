@@ -37,9 +37,11 @@ int main(int argc, char** argv) {
         {"IQ4_XS", native_iq4_xs_mmvq, 136, 256, {0}},
         {"IQ4_NL", native_iq4_nl_mmvq, 18, 32, {0}},
         {"Q5_K", native_q5_k_mmvq, 176, 256, {0, 2}},
+        {"Q4_0", native_q4_0_mmvq, 18, 32, {0}},
     };
     struct Case { const char* what; const char* fmt; int n_in, n_out; };
     std::vector<Case> cases = {
+        {"dhead q6", "Q6_K", 2560, 106299}, {"dhead q4_0", "Q4_0", 2560, 106299}, {"dhead xs", "IQ4_XS", 2560, 106299}, {"dhead q4k", "Q4_K", 2560, 106299},
         {"GDN qkv", "Q6_K", 2560, 10240}, {"GDN out", "Q6_K", 6144, 2560}, {"GDN z", "Q4_K", 2560, 6144},
         {"QSA out", "Q4_K", 6144, 2560}, {"QSA q", "IQ4_XS", 2560, 12288}, {"shexp dn", "IQ4_NL", 640, 2560}, {"shexp gate", "Q4_K", 2560, 640},
         {"GDN qkv5", "Q5_K", 2560, 10240}, {"shexp q6", "Q6_K", 2560, 640}, {"shexp xs", "IQ4_XS", 2560, 640},
