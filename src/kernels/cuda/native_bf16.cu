@@ -486,6 +486,30 @@ void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
         (reinterpret_cast<uintptr_t>(y) & 3u) != 0)
         throw std::invalid_argument("bf16_gemv_fp32_mmvf: null or misaligned pointer");
     const cudaStream_t st = (cudaStream_t) stream;
+#if defined(STRATA_HIP_GFX906)
+    // gfx906: one row a block (512 blocks for the router's 512 x 2560) hits a ~70 us stall on this card (a 512-row
+    // launch measured 77 us, the same rows four to a block 13-19 us: router_chain_bench, a bare read kernel too).  The
+    // rows kernel (STRATA_MMVF_ROWS) at one token: the same pairs, FMAs and reductions per output - bitwise this
+    // kernel's.  STRATA_G906_MMVF1=0 keeps one row a block.
+    static const bool g906_rows1 = [] { const char* v = std::getenv("STRATA_G906_MMVF1"); return !(v && v[0] == '0'); }();
+    if (g906_rows1 && n_out >= 64 && n_in <= std::numeric_limits<int>::max()) {
+        const int ni = (int) n_in, no = (int) n_out;
+        switch (mmvf_block_size(n_in)) {
+            case 32: launch_rows<32>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+            case 64: launch_rows<64>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+            case 96: launch_rows<96>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+            case 128: launch_rows<128>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+            case 160: launch_rows<160>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+            case 192: launch_rows<192>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+            case 224: launch_rows<224>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+            default: launch_rows<256>(x, n_in, w, y, n_out, ni, no, 1, st); break;
+        }
+        const cudaError_t result = cudaGetLastError();
+        if (result != cudaSuccess)
+            throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf launch: ") + cudaGetErrorString(result));
+        return;
+    }
+#endif
 #define STRATA_MMVF_CASE(N) case N: \
     bf16_f32_mmvf_kernel<N><<<(unsigned) n_out, N, 0, st>>>(x, w, y, (int) n_in, mmvf_fast()); break
     switch (mmvf_block_size(n_in)) {

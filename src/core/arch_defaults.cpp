@@ -284,11 +284,14 @@ std::vector<std::pair<std::string, std::string>> launch_default_env(const char* 
 // STRATA_SH_STREAM=0 (the shared expert's own stream pays on gfx906, unlike RDNA).
 std::vector<std::pair<std::string, std::string>> gfx906_default_env() {
     return {
-        {"STRATA_EXP_MODE", "8"},                       // experts: gate/up + SwiGLU + q8_1 in one kernel (native_gu_fused_kernel)
+        {"STRATA_EXP_MODE", "9"},                       // experts: gate/up + SwiGLU + q8_1 in one kernel, the grid formats
+                                                        // decoded once a word (g906_gu_kernel; bitwise mode 8's)
         {"STRATA_GFX906_ATTN_QUERY_SWIZZLE", "1"},      // QSA decode attention: the gfx906 query layout (int8 KV)
         {"STRATA_GFX906_ATTN_REDUCE12", "1"},           // ... and its 12-lane reduction
         {"STRATA_LFUSE", "1"},                          // router + shared-expert gate in one BF16 projection
         {"STRATA_MMVF_ROWS", "1"},                      // ... with the rows kernel
+        {"STRATA_ATTN_MERGE_V2", "1"},                  // QSA merge bounded by the live width (bitwise attn_merge_kernel; the
+                                                        // drafter's merge walked all 512 chunks of --mtp-window: 243 -> ~17 us)
     };
 }
 

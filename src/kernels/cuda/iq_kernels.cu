@@ -6155,6 +6155,255 @@ __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned lon
     }
 }
 
+#if defined(STRATA_HIP_GFX906)
+// ---- 9 (gfx906): mode 8's gate/up + SwiGLU + q8_1 with each weight word decoded ONCE for all of a chunk's tokens
+// and without the correction dot.  Mode 8 spends ~3 VALU ops a weight on the decode (nib_mask's (b << 8) - b is a
+// quarter-rate v_mul_lo_u32, and dp4a(g ^ m, u) - dp4a(m, u) costs a second dot a token).  Here (g ^ m) + b is the
+// signed grid word (b: one bit a negative byte, m: 0xff there; no grid byte is 0, so no carry crosses a byte), and
+// each token costs one dp4a a word.  A sign table in LDS instead of g9_swn's ALU was slower (random 16-byte LDS reads
+// conflict); so was double-buffering the passes' loads (151 VGPRs, one wave a SIMD).  The integers are mode 8's, the
+// floats and their order are mode 8's (same lanes, same k order, same warp_sum): the output is bitwise mode 8's
+// (native_expert_bench, all 48 layers).  T = 2, 20 groups: IQ3_XXS 147 -> 127 us, IQ3_S 160 -> 153, IQ2_S 163 -> 159.
+typedef int g9_i1 __attribute__((aligned(2)));
+typedef int g9_i2 __attribute__((ext_vector_type(2), aligned(2)));
+// The same signed word from a 4-bit sign nibble in ALU, no LDS: the nibble spread to one bit a byte (v_mul_u32_u24 -
+// full rate, unlike nib_mask's (b << 8) - b), then v_perm_b32 turns selector bytes 0x0c / 0x0d into 0x00 / 0xff.
+__device__ __forceinline__ int g9_swn(uint32_t g, uint32_t nib) {
+    const uint32_t b = __umul24(nib, 0x204081u) & 0x01010101u;
+    const uint32_t m = __builtin_amdgcn_perm(0u, 0u, b | 0x0C0C0C0Cu);
+    return (int) ((g ^ m) + b);
+}
+
+
+template<int TG> struct G9;
+template<> struct G9<18> {   // IQ3_XXS: 8 grid bytes, 4 x 7 sign bits + a 4-bit scale a call
+    static constexpr int BS = (int) sizeof(block_iq3_xxs);
+    struct Raw { g9_i2 q; uint32_t aux; half d; };
+    struct Sc { float d; int ls; };
+    __device__ static __forceinline__ void load(const uint8_t* b, int iqs, Raw& r) {
+        const block_iq3_xxs* bq = (const block_iq3_xxs*) b;
+        r.q = *(const g9_i2*) (bq->qs + 4 * iqs);
+        r.aux = (uint32_t) *(const g9_i1*) (bq->qs + QK_K / 4 + 2 * iqs);
+        r.d = bq->d;
+    }
+    __device__ static __forceinline__ void decode(const Raw& r, const uint32_t* grid, int (&W)[8], Sc& sc, int) {
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint32_t qw = (uint32_t) (l < 2 ? r.q.x : r.q.y), sh = 16 * (l & 1);
+            const uint32_t v = (r.aux >> (7 * l)) & 0x7Fu, sb = v | ((__popc(v) & 1u) << 7);
+            W[2 * l + 0] = g9_swn(grid[(qw >> sh) & 0xFFu], sb & 0xFu);
+            W[2 * l + 1] = g9_swn(grid[(qw >> (sh + 8)) & 0xFFu], sb >> 4);
+        }
+        sc.d = __half2float(r.d);
+        sc.ls = (int) (r.aux >> 28);
+    }
+    __device__ static __forceinline__ int finish(int lo, int hi, const Sc& sc) {
+        const int sumi = lo + hi;   // |sumi| < 2^18: the 24-bit multiply is exact
+        return (__mul24(sc.ls, sumi) + sumi / 2) / 2;
+    }
+};
+template<> struct G9<21> {   // IQ3_S: 8 grid bytes + 8 high bits, 4 sign bytes, a 4-bit scale a call
+    static constexpr int BS = (int) sizeof(block_iq3_s);
+    struct Raw { g9_i2 q; uint32_t sp; uint8_t qh, sc; half d; };
+    struct Sc { float d; int m; };
+    __device__ static __forceinline__ void load(const uint8_t* b, int iqs, Raw& r) {
+        const block_iq3_s* bq = (const block_iq3_s*) b;
+        r.q = *(const g9_i2*) (bq->qs + 4 * iqs);
+        r.qh = bq->qh[iqs / 2];
+        r.sp = (uint32_t) *(const g9_i1*) (bq->signs + 2 * iqs);
+        r.sc = bq->scales[iqs / 4];
+        r.d = bq->d;
+    }
+    __device__ static __forceinline__ void decode(const Raw& r, const uint32_t* grid, int (&W)[8], Sc& sc, int iqs) {
+        const uint32_t qh = r.qh;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint32_t qw = (uint32_t) (l < 2 ? r.q.x : r.q.y), sh = 16 * (l & 1);
+            W[2 * l + 0] = g9_swn(grid[((qw >> sh) & 0xFFu) | ((qh << (8 - 2 * l)) & 0x100u)], (r.sp >> (8 * l)) & 0xFu);
+            W[2 * l + 1] = g9_swn(grid[((qw >> (sh + 8)) & 0xFFu) | ((qh << (7 - 2 * l)) & 0x100u)], (r.sp >> (8 * l + 4)) & 0xFu);
+        }
+        sc.d = __half2float(r.d);
+        sc.m = 1 + 2 * ((r.sc >> ((iqs << 1) & 0x04)) & 0x0F);
+    }
+    __device__ static __forceinline__ int finish(int lo, int hi, const Sc& sc) { return __mul24(lo + hi, sc.m); }
+};
+template<> struct G9<22> {   // IQ2_S: 4 grid bytes + 2-bit highs (8 weights each), 4 sign bytes, two 4-bit scales a call
+    static constexpr int BS = (int) sizeof(block_iq2_s);
+    struct Raw { uint32_t qsw, sp; uint8_t qh, sc; half d; };
+    struct Sc { float d; int ls0, ls1; };
+    __device__ static __forceinline__ void load(const uint8_t* b, int iqs, Raw& r) {
+        const block_iq2_s* bq = (const block_iq2_s*) b;
+        r.qsw = (uint32_t) *(const g9_i1*) (bq->qs + 2 * iqs);
+        r.sp = (uint32_t) *(const g9_i1*) (bq->qs + QK_K / 8 + 2 * iqs);
+        r.qh = bq->qh[iqs / 2];
+        r.sc = bq->scales[iqs / 2];
+        r.d = bq->d;
+    }
+    __device__ static __forceinline__ void decode(const Raw& r, const uint64_t* grid, int (&W)[8], Sc& sc, int) {
+        const uint32_t qh = r.qh;
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            const uint2 gg = *(const uint2*) (grid + (((r.qsw >> (8 * l)) & 0xFFu) | ((qh << (8 - 2 * l)) & 0x300u)));
+            W[2 * l + 0] = g9_swn(gg.x, (r.sp >> (8 * l)) & 0xFu);
+            W[2 * l + 1] = g9_swn(gg.y, (r.sp >> (8 * l + 4)) & 0xFu);
+        }
+        sc.d = __half2float(r.d);
+        sc.ls0 = r.sc & 0x0F;
+        sc.ls1 = r.sc >> 4;
+    }
+    __device__ static __forceinline__ int finish(int lo, int hi, const Sc& sc) {
+        return (__mul24(lo, sc.ls0) + __mul24(hi, sc.ls1) + (lo + hi) / 2) / 4;
+    }
+};
+
+// NIT > 0: the row has at most NIT calls a lane (n_embd <= NIT * 32 * 32): every weight load of a pass is issued
+// before the first decode, so a pass waits for memory once, not once a call
+template<int TG, int NIT>
+__global__ void __launch_bounds__(256) g906_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                      const int32_t* __restrict__ grp_start,
+                                                      const int32_t* __restrict__ n_groups,
+                                                      const int32_t* __restrict__ ent_tok,
+                                                      const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                      block_q8_1* __restrict__ hq) {
+    using D = G9<TG>;
+    using GT = typename GridOf<TG>::T;
+    __shared__ GT sgrid[GridOf<TG>::N];
+    __shared__ float res[LDS_NT][64];
+    extern __shared__ int sx_raw[];
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    const GT* gsrc = GridOf<TG>::src();
+    for (int i = tid; i < GridOf<TG>::N; i += 256) sgrid[i] = gsrc[i];
+    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const int nk = (int) (L.n_embd / QK_K) * 8, xb = (int) (L.n_embd / 32), hb = (int) (L.n_ff / 32);
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const int r0 = blockIdx.x * 32;
+    const block_q8_1* sx = (const block_q8_1*) sx_raw;
+    // call k = lane + 32 i: block kbx = k / 8 = lane / 8 + 4 i, part iqs = 2 (k % 8) = 2 (lane % 8) - fixed a lane
+    const int iqs = 2 * (lane & 7), kb0 = lane >> 3;
+    auto wrow = [&](int i) -> const uint8_t* {   // i < 32: gate row r0 + i, else up row r0 + i - 32
+        return blob + (i < 32 ? (size_t) 0 : L.up_off) + (size_t) (r0 + (i & 31)) * L.gu_row;
+    };
+    for (int c0 = e0; c0 < e1; c0 += LDS_NT) {
+        const int cn = min(LDS_NT, e1 - c0);
+        __syncthreads();
+        for (int j = 0; j < cn; ++j) {
+            const int* src = (const int*) (xq + (size_t) ent_tok[c0 + j] * xb);
+            for (int i = tid; i < xb * 9; i += 256) sx_raw[j * xb * 9 + i] = src[i];
+        }
+        __syncthreads();
+        using R = typename D::Raw;
+        constexpr int NR = NIT > 0 ? NIT : 1;
+        // pass p: gate/up rows i0 = 16 p + warp and i1 = i0 + 8 of the block's 64; the raw weights in ra / rb (NIT > 0)
+        auto pass = [&](auto ntc, int p, const R (&ra)[NR], const R (&rb)[NR]) {
+            constexpr int NTC = decltype(ntc)::value;
+            const int i0 = p * 16 + warp, i1 = i0 + 8;
+            const block_q8_1* xl = sx + kb0 * 8 + iqs / 2;
+            float s0[NTC], s1[NTC];
+#pragma unroll
+            for (int j = 0; j < NTC; ++j) { s0[j] = 0.0f; s1[j] = 0.0f; }
+            auto call = [&](const R& xa, const R& xb_, int it) {
+                int W0[8], W1[8];
+                typename D::Sc c0s, c1s;
+                D::decode(xa, sgrid, W0, c0s, iqs);
+                D::decode(xb_, sgrid, W1, c1s, iqs);
+#pragma unroll
+                for (int j = 0; j < NTC; ++j) {
+                    const block_q8_1* xk = xl + (size_t) j * xb + it * 32;
+                    const int* u = (const int*) xk->qs;
+                    int alo = 0, ahi = 0, blo = 0, bhi = 0;
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        const int ui = u[i];
+                        alo = ggml_cuda_dp4a(W0[i], ui, alo);
+                        blo = ggml_cuda_dp4a(W1[i], ui, blo);
+                    }
+#pragma unroll
+                    for (int i = 4; i < 8; ++i) {
+                        const int ui = u[i];
+                        ahi = ggml_cuda_dp4a(W0[i], ui, ahi);
+                        bhi = ggml_cuda_dp4a(W1[i], ui, bhi);
+                    }
+                    const float dx = __low2float(xk->ds);
+                    const float a = (c0s.d * dx) * (float) D::finish(alo, ahi, c0s);
+                    const float b = (c1s.d * dx) * (float) D::finish(blo, bhi, c1s);
+                    s0[j] += a;
+                    s1[j] += b;
+                }
+            };
+            if constexpr (NIT > 0) {
+#pragma unroll
+                for (int it = 0; it < NIT; ++it)
+                    if (lane + 32 * it < nk) call(ra[it], rb[it], it);
+            } else {
+                const uint8_t* w0 = wrow(i0) + (size_t) kb0 * D::BS;
+                const uint8_t* w1 = wrow(i1) + (size_t) kb0 * D::BS;
+                for (int k = lane, it = 0; k < nk; k += 32, ++it) {
+                    R xa, xb2;
+                    D::load(w0 + (size_t) it * 4 * D::BS, iqs, xa);
+                    D::load(w1 + (size_t) it * 4 * D::BS, iqs, xb2);
+                    call(xa, xb2, it);
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < NTC; ++j) {
+                const float a = warp_sum(s0[j]), b = warp_sum(s1[j]);
+                if (lane == 0) { res[j][i0] = a; res[j][i1] = b; }
+            }
+        };
+        auto run = [&](int p, const R (&ra)[NR], const R (&rb)[NR]) {
+            switch (cn) {
+                case 1: pass(std::integral_constant<int, 1>{}, p, ra, rb); break;
+                case 2: pass(std::integral_constant<int, 2>{}, p, ra, rb); break;
+                case 3: pass(std::integral_constant<int, 3>{}, p, ra, rb); break;
+                default: pass(std::integral_constant<int, 4>{}, p, ra, rb); break;
+            }
+        };
+        if constexpr (NIT > 0) {
+            // a pass's weight loads all issued before its first decode
+            R ca[NR], cb[NR];
+            auto loadp = [&](int p, R (&A)[NR], R (&B)[NR]) {
+                const int i0 = p * 16 + warp, i1 = i0 + 8;
+                const uint8_t* w0 = wrow(i0) + (size_t) kb0 * D::BS;
+                const uint8_t* w1 = wrow(i1) + (size_t) kb0 * D::BS;
+#pragma unroll
+                for (int it = 0; it < NIT; ++it)
+                    if (lane + 32 * it < nk) {
+                        D::load(w0 + (size_t) it * 4 * D::BS, iqs, A[it]);
+                        D::load(w1 + (size_t) it * 4 * D::BS, iqs, B[it]);
+                    }
+            };
+#pragma unroll 1
+            for (int p = 0; p < 4; ++p) {
+                loadp(p, ca, cb);
+                run(p, ca, cb);
+            }
+        } else {
+            R da[NR], db[NR];
+#pragma unroll
+            for (int p = 0; p < 4; ++p) run(p, da, db);
+        }
+        __syncthreads();
+        if (warp < cn) {   // mode 8's epilogue: swiglu_entries_kernel + quantize_q8_1_kernel, one q8_1 block per entry
+            const float gg = res[warp][lane], uu = res[warp][32 + lane];
+            const float xi = (gg / (1.0f + __expf(-gg))) * uu;
+            float amax = fabsf(xi), sum = xi;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+                sum += __shfl_xor_sync(0xffffffffu, sum, o);
+            }
+            const float d = q8_1_finite(amax / 127.0f);
+            const int8_t q = q8_1_quant(xi, d, amax);
+            block_q8_1* y = hq + (size_t) (c0 + warp) * hb + blockIdx.x;
+            y->qs[lane] = q;
+            if (lane == 0) y->ds = q8_1_ds(d, sum);
+        }
+    }
+}
+#endif
+
 // dflash2-kern: Strix Halo (gfx1151) takes mode 8 (gate/up + SwiGLU + q8_1 in one launch, the group's activations in LDS) for the
 // IQ packs' gate/up: native_expert_bench on the IQ3_S pack's real rows, 45 groups of one entry (a 8-token verify window's call),
 // gate/up -25% (IQ2_S), -8% (IQ3_XXS), -6% (IQ3_S), bitwise equal to mode 0.  STRATA_GFX1151_EXP8=0 keeps the old layout.
@@ -6379,11 +6628,27 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #endif
 #endif
 #if STRATA_EXP_LAYOUTS
-    const bool fused_gu = !nib_layout(L) && em0 == 8 && ((kExpLds16 && L.gu_type == 16) || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23) &&
+    const bool fused_gu = !nib_layout(L) && (em0 == 8 || em0 == 9) && ((kExpLds16 && L.gu_type == 16) || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23) &&
                           L.n_ff % 32 == 0;
     if (fused_gu && g_exp_phase != 2) {
         const dim3 gl((unsigned) (L.n_ff / 32), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_embd / 32) * sizeof(block_q8_1);
+#if defined(STRATA_HIP_GFX906)
+        // mode 9: the gfx906 decode-once kernel for the grid formats (bitwise mode 8)
+        const bool g9 = em0 == 9 && L.n_embd % QK_K == 0 && (L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22);
+#else
+        const bool g9 = false;
+#endif
+        if (g9) {
+#if defined(STRATA_HIP_GFX906)
+            const bool n3 = L.n_embd <= 3 * 32 * 32;   // <= 3 calls a lane: the hoisted loads (2560: 80 calls a row)
+#define STRATA_G9(T) (n3 ? g906_gu_kernel<T, 3> : g906_gu_kernel<T, 0>)<<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq)
+            if (L.gu_type == 18) STRATA_G9(18);
+            else if (L.gu_type == 21) STRATA_G9(21);
+            else STRATA_G9(22);
+#undef STRATA_G9
+#endif
+        } else
         switch (L.gu_type) {
             case 16: native_gu_fused_kernel<16><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
             case 18: native_gu_fused_kernel<18><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
@@ -6424,7 +6689,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     if (g_exp_phase != 2 && !gs_done) {
 #endif
 #if STRATA_EXP_LAYOUTS
-    const bool lds_gu = !nib_layout(L) && (em0 == 5 || em0 == 6 || em0 == 7 || em0 == 8) && ((kExpLds16 && L.gu_type == 16) || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23);
+    const bool lds_gu = !nib_layout(L) && (em0 == 5 || em0 == 6 || em0 == 7 || em0 == 8 || em0 == 9) && ((kExpLds16 && L.gu_type == 16) || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23);
     if (lds_gu) {
         const dim3 gl((unsigned) ((2 * L.n_ff + LDS_RB - 1) / LDS_RB), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_embd / 32) * sizeof(block_q8_1);
@@ -6510,7 +6775,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     cudaGetDevice(&dev_d);
     // gfx1151: the LDS down kernel is slower than the CUDA layout for IQ4_NL (86 vs 63 us, 24 groups) and faster for Q2_0 (-18%)
     const bool lds_down_ok = L.d_type == 42 || (L.d_type == 20 && !gfx1151_exp8(dev_d));
-    if ((em0d == 7 || em0d == 8) && lds_down_ok) {
+    if ((em0d == 7 || em0d == 8 || em0d == 9) && lds_down_ok) {
         const dim3 gl((unsigned) ((L.n_embd + LDS_RB - 1) / LDS_RB), (unsigned) cap_groups);
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_ff / 32) * sizeof(block_q8_1);
         if (L.d_type == 20) native_down_lds_kernel<20><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
