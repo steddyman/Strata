@@ -242,3 +242,22 @@ kernel came in at 2.3x on its own matrix but 2 % end to end, which is why every 
 Risks: verify windows need every column exact across T (or decode and verify disagree); the GDN recurrence has
 its own bitwise rules; gfx906 has 64 KB LDS and no matrix cores; ROCm for gfx906 comes from TheRock's community
 wheels, so a compiler change can move the numbers — pin `ROCM_VER` per measurement.
+
+## Round 4 — the formats the other Flash-Next packs use (0.1.59.15)
+
+Read from the GGUF headers of every GSQ-RCO pack (ISTA-DASLab, Swift-1.5): the IQ3_XXS / IQ2_XS packs put 19 / 14
+layers' expert gate/up in IQ2_XS / IQ2_XXS (and IQ1_M in 3), the Q2_0 packs every expert matrix in Q2_0 and most
+dense ones in Q3_K / Q2_0, the IQ2_XS packs dense matrices in IQ3_S.  None of these had a gfx906 kernel: gate/up ran
+mode 8's R2 fallback (~80 GB/s), dense the generic wave / IQ mmvq kernels.
+
+Iteration used the single-layer benches only (seconds a try): `eb.sh` (native_expert_bench; `M=` another GGUF - a
+pack we do not have is fetched one layer at a time by HTTP range into a small GGUF) and `mb.sh` (mmvq_bench with a case
+filter; `dcmp.py` compares against `STRATA_G906_DENSE9=0`'s outputs).  The engine A/B and quality runs only at the end.
+
+- Mode 9 gate/up (G 20, T 2): IQ2_XS 234 -> 85 us, IQ2_XXS 225 -> 78, IQ1_M 162 -> 78 (8 x (g + delta) as
+  integers: one v_perm a word), Q2_0 110 -> 79 (T 1 61 -> 69: its tiny rows; T 4 205 -> 98).  Bitwise mode 8's.
+  Tried and dropped for Q2_0: aligned dword loads + alignbit (no gain), a whole block a call (79 us at T 1: idle lanes).
+- Dense (T 1 / T 4, 10240x2560): IQ3_S 58 -> 33 / 87 -> 47 us (bitwise), Q3_K 47 -> 31 / 99 -> 57, Q2_0 37 -> 26 /
+  67 -> 38 (rounding-level; Q2_0's 640-row shared-expert matrices keep the old kernel).
+- IQ3_XXS pack, auto clocks, 3 rounds: 25.0 -> 23.4 ms a window, ~77 -> ~83 tok/s; quality vs 0.1.59.14 identical
+  (top-1 100 %, KL 0).  The Q2_0 / IQ2_XS packs are not measured end to end (not downloaded).
