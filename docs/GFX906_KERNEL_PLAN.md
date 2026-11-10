@@ -116,6 +116,13 @@ beside it; `wait_flag_ge` 0.6 ms), CUDA1's 24 layers + head 16.8 ms, the hand-of
 "chain late" (the drafter's next chain not ready in time) blocks ~20-25 % of the chances.  0.1.59.12's kernels save
 ~0.45 ms a serial window (30.0 -> 29.55), invisible in the pipelined one.
 
+Drafters, re-measured at `auto` clocks (0.1.59.11): DFlash2 (`selq4` pack, window 6 / 8, conf 0.35 / 0.55) 55-58
+tok/s against MTP's 71-77 - it turns the pipeline off and drafts no more tokens a window (~2.0) - so MTP stays the
+gfx906 default (`drafting.py` AUTO_MTP).  The MTP draft head (106,299 rows, 213 MiB of Q6_K, 344 us a draft step):
+`--mtp-q4 head` as Q4_0 saved nothing (the wave kernel, 328 us); as IQ4_XS on the lane-group kernel it reads in 220 us,
+the same tokens a window (1.919 vs 1.924) and 25.81 -> 25.50 ms a window: on by default on gfx906 since 0.1.59.14
+(`STRATA_GFX906_MTP_HEAD4=0` off).  `--mtp-q4 all` (the projections too) loses ~9 % of the accepted tokens.
+
 So what is left is either more kernel work spread over every layer (each 1 % of a half is ~0.15 ms), a faster drafter
 chain (fewer late chains; e.g. a lower-bit copy of the 106K-row draft head, 340 us of each ~0.95 ms step), or better
 drafts (more on-path windows).
