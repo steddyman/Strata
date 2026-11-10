@@ -97,8 +97,28 @@ the text).  At `auto` clocks the kernels are no longer what bounds the window:
 
 So the window is a dependency chain - the CPU expert plan a layer (doorbell -> host -> `wait_flag_ge`), the GPU hand-off,
 the MTP draft steps (~0.95 ms each on CUDA1, 340 us of it the 106K-row LM head), speculative windows mostly rolled back
-- rather than a sum of kernel time.  Next work there is scheduling, not kernels: what a window waits on per layer, the
-rollback rate of `--pipeline-windows 2`, and where the drafter runs.
+- rather than a sum of kernel time.
+
+Scheduling, measured (0.1.59.11, `auto` clocks, 2 x 2 interleaved runs each):
+
+| Setting | ms / window | Note |
+| --- | ---: | --- |
+| default (pipelined windows, drafter on CUDA1, theta 0.20) | 25.7-26.4 | fresh windows ~28-29 ms, on-path speculative ~18 ms |
+| `STRATA_PIPELINE_AUTO=0` (serial) | 29.5-30.0 | 66-67 tok/s against 74: the pipeline pays |
+| `STRATA_MTP_STAGE0=1` (drafter on CUDA0) | 28.2-28.7 | fresh windows 32.8 ms: worse, as noted before on gfx906 |
+| theta 0.05 / 0.40 (`STRATA_PIPELINE_DEBUG=1 STRATA_PIPELINE_THETA`) | 25.8-26.0 / 27.0-27.2 | lower is at most ~1.5 % better (within noise) |
+| `--layer-split 26` / `28` | 25.4-26.3 | no change |
+| `STRATA_VERIFY_DEVICE_PLAN=1` | 25.5-26.7 | no change |
+
+A serial window (trace): CUDA0's 24 layers 16.3 ms (98 % of it kernels: main stream 12 ms, the side stream 5.9 ms
+beside it; `wait_flag_ge` 0.6 ms), CUDA1's 24 layers + head 16.8 ms, the hand-off ~0.5 ms, the drafter's chain 3.3 ms
+(traced times).  The pipeline turns ~25-35 % of windows into on-path speculative ones; the rest are rolled back, and
+"chain late" (the drafter's next chain not ready in time) blocks ~20-25 % of the chances.  0.1.59.12's kernels save
+~0.45 ms a serial window (30.0 -> 29.55), invisible in the pipelined one.
+
+So what is left is either more kernel work spread over every layer (each 1 % of a half is ~0.15 ms), a faster drafter
+chain (fewer late chains; e.g. a lower-bit copy of the 106K-row draft head, 340 us of each ~0.95 ms step), or better
+drafts (more on-path windows).
 
 Next, by the trace (rocprofv3 --kernel-trace on a live serve; the engine must get SIGINT itself to write it):
 expert gate/up and down (~4 s of 26 s traced, ALU-bound grid lookups), QSA `attn_merge` (87 us on 24 blocks),
