@@ -621,8 +621,18 @@ constexpr int kGuRW = 1, kDnRW = 2;   // rows a warp: gate / up (n_embd 5120: 10
 
 // grid (n_ff / (8 RW), groups): RW rows of the gate and of the up a warp, NE of the group's entries a pass (each
 // sub-block decoded once for them) -> h = the clamped swiglu
+#if defined(STRATA_HIP_GFX906)
+// gfx906: the IQ1_M token gate / up compiled to 108 VGPRs (2 waves a SIMD); DS4_G906_GU_WPE waves a SIMD asked for instead
+// (rocprof, IQ1_M gate / up a call: 2 waves 139 us, 3 waves 134, 4 waves 157 - spills)
+#ifndef DS4_G906_GU_WPE
+#define DS4_G906_GU_WPE 3
+#endif
+#define DS4_GU_ATTR __attribute__((amdgpu_waves_per_eu(DS4_G906_GU_WPE)))
+#else
+#define DS4_GU_ATTR
+#endif
 template <int T, int NE, int RW = kGuRW>
-__global__ void __launch_bounds__(kThreads) gate_up_kernel(const Args a, int groups) {
+__global__ void __launch_bounds__(kThreads) DS4_GU_ATTR gate_up_kernel(const Args a, int groups) {
     constexpr int LPR = 32 / RW;
     constexpr int kBPS = kQK<T> == 32 ? 1 : 8, kStep = LPR / kBPS;   // sub-blocks a block; blocks a lane steps
     static_assert(LPR % kBPS == 0, "a lane keeps one sub-block position");

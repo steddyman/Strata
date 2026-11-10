@@ -3591,8 +3591,8 @@ struct Model::Impl {
         }
         // the CPU lane: one pool of workers per NUMA node, each expert split in NH column parts (part X on node X); in
         // place, one part (the files' layout) and one pool over every node's cores (the pages lie where the cache put them)
-        static const bool smt_cores = [] {   // DS4_CPU_SMT=1 (Windows): the second hardware thread of every core as well
-#if defined(_WIN32)
+        static const bool smt_cores = [] {   // DS4_CPU_SMT=1 (Windows, and gfx906 Linux builds): the second hardware thread of every core as well
+#if defined(_WIN32) || defined(STRATA_HIP_GFX906)
             const char* v = std::getenv("DS4_CPU_SMT");
             return v != nullptr && std::atoi(v) != 0;
 #else
