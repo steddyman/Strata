@@ -48,6 +48,9 @@ NOTE_EXTRA=""; [ "$V" = rx6000 ] && NOTE_EXTRA=" (built, not tested on a real RX
 ENGINE_DEFS=(-DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_PREFILL_MMQ=ON)
 [ "$V" = gfx906 ] && ENGINE_DEFS=(-DSTRATA_HIP_GFX906=ON -DCMAKE_C_COMPILER=$HP/llvm/bin/clang -DCMAKE_CXX_COMPILER=$HP/llvm/bin/clang++)
 if [ -z "${DSV41:-}" ]; then DSV41=0; [ "$V" = rx9070 ] && [ -z "${SHAPE:-}" ] && DSV41=1; fi
+# the DeepSeek engine's backend switches: the wave32 HIP backend, or for gfx906 the wave64 compat toolchain (DSV41=1 builds it there too)
+DSV41_DEFS=(-DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF)
+[ "$V" = gfx906 ] && DSV41_DEFS=(-DSTRATA_HIP_GFX906=ON -DCMAKE_C_COMPILER=$HP/llvm/bin/clang -DCMAKE_CXX_COMPILER=$HP/llvm/bin/clang++)
 [ -n "${SHAPE:-}" ] && [ "$DSV41" = 1 ] && { echo "build_hip_linux.sh: SHAPE and DSV41=1 do not go together (a shape package is the Strata engine program only)" >&2; exit 2; }
 ARCHLIST=${ARCHS//;/ }
 DATAARCH=${ARCHS//;/,}
@@ -79,7 +82,7 @@ if [ -z "${VISION_ONLY:-}" ]; then
   [ -x "$OUT/b/strata" ] || { st "ABORT no strata"; exit 1; }
   if [ "$DSV41" = 1 ]; then      # own build tree: the engine's flags stay as they were; STRATA_NATIVE_EXPERTS=ON is what the DeepSeek path was built with
     rm -f "$OUT/bd/CMakeCache.txt" "$OUT/bd/strata-dsv41"      # (the build id is baked in at configure time: always configure again)
-    cmake -G Ninja -S . -B "$OUT/bd" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_BUILD_TESTS=OFF       -DSTRATA_BUILD_DSV41=ON -DSTRATA_NATIVE_EXPERTS=ON "-DCMAKE_HIP_ARCHITECTURES=$ARCHS" "${HIPDEFS[@]}" -DSTRATA_GGML_DIR="$LLAMA" -DSTRATA_PORTABLE=ON       "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath,'\$ORIGIN' -Wl,--enable-new-dtags" > "$OUT/cfg-dsv41.log" 2>&1
+    cmake -G Ninja -S . -B "$OUT/bd" -DCMAKE_BUILD_TYPE=Release "${DSV41_DEFS[@]}" -DSTRATA_BUILD_TESTS=OFF       -DSTRATA_BUILD_DSV41=ON -DSTRATA_NATIVE_EXPERTS=ON "-DCMAKE_HIP_ARCHITECTURES=$ARCHS" "${HIPDEFS[@]}" -DSTRATA_GGML_DIR="$LLAMA" -DSTRATA_PORTABLE=ON       "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath,'\$ORIGIN' -Wl,--enable-new-dtags" > "$OUT/cfg-dsv41.log" 2>&1
     chk $? "dsv41 configured"
     nice -n 10 cmake --build "$OUT/bd" --target strata-dsv41 -j "$JOBS" > "$OUT/build-dsv41.log" 2>&1
     chk $? "dsv41 built"
