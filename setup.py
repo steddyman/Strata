@@ -9562,6 +9562,11 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
     step(4, "the DeepSeek engine")
     eng, meta, lib_dirs = ROOT / "engine", {"version": None}, []
     exe = dsv41_exe(eng)
+    if exe is None and hip and not getattr(a, "dsv41_package", None):
+        # a gfx906 engine package carries strata-dsv41 inside it and the feed has none of its own: taken from the installed engine (no download)
+        from strata_control import dsv41_engine
+        if dsv41_engine.from_engine_store(dsv41_engine_dir(eng), emit=lambda m: say("  " + m)) is not None:
+            exe = dsv41_exe(eng)
     if (exe is None and not getattr(a, "dsv41_package", None) and not dsv41_engine_pending(eng) and not local_feed(getattr(a, "feed", None))
         and not github_reachable()):
         fail("Strata can't reach GitHub to download the DeepSeek engine.",
