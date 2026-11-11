@@ -1,5 +1,8 @@
 # gfx906 decode rewrite: plan
 
+> The machine, the clock setting and the results for every model in one place:
+> [MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md). This file is the working log of the Qwen3.8-Flash-Next kernels.
+
 Goal: decode on two gfx906 dies (Radeon Pro Vega II Duo; also 2x MI50/MI60) much closer to what HBM2 can deliver,
 with gfx906-native kernels instead of CUDA-shaped kernels compiled through HIP.
 
@@ -78,8 +81,10 @@ router 8 %, sync 6.5 %, attention 5 %):
   where >= 128 blocks remain; a Q5_K kernel.  The 640-row shared-expert matrices are launch/latency-bound (~8-15 us
   isolated); in the trace they read 40-80 us because they share the GPU with the experts' stream.
 
-**Clock note**: `/etc/udev/rules.d/30-amdgpu-pm.rules` sets `power_dpm_force_performance_level=low` on both cards,
-which pins the shader clock at 999 MHz (the card boosts to 1730 MHz).  All numbers here are at that setting.
+**Clock note**: `/etc/udev/rules.d/30-amdgpu-pm.rules` set `power_dpm_force_performance_level=low` on both cards,
+which pins the shader clock at 999 MHz (the card boosts to 1730 MHz).  The rows above 0.1.59.10's `auto` row are at that
+setting; the rule now sets `auto`, and every later number is at `auto`.  How to check and change it, and the app's
+warning: [MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md#before-you-start-let-the-gpus-clock-up).
 
 At `auto` clocks each GPU is busy ~70-77 % of a steady decode: the rest is the window's cross-GPU and host round
 trip, not kernel time.  The drafter's LM head (106K x 2560 Q6_K, 340 us a window) already reads at ~85 % of the

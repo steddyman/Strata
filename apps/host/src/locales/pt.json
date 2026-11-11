@@ -3527,5 +3527,12 @@
   "s9035": "Estes arquivos do modelo estão faltando: {0}.",
   "s9036": "Pressione Baixar e carregar de novo para buscá-los. Os arquivos que já estão aí são mantidos. Se os mesmos arquivos aparecerem de novo, abra os Detalhes e compartilhe-os ao pedir ajuda.",
   "s9037": "Esta atualização foi interrompida quando o aplicativo reiniciou. Uma atualização posterior terminou, então não há nada a fazer.",
-  "s9038": "Este sistema não deixa o Strata usar a porta {0}. No Linux e no macOS, as portas abaixo de 1024 precisam de direitos de administrador. Inicie o Strata com outra porta (STRATA_PORT), por exemplo 8801."
+  "s9038": "Este sistema não deixa o Strata usar a porta {0}. No Linux e no macOS, as portas abaixo de 1024 precisam de direitos de administrador. Inicie o Strata com outra porta (STRATA_PORT), por exemplo 8801.",
+  "s9039": "Os clocks da sua GPU AMD estão fixos no nível mais baixo.",
+  "s9040": "{0}. Assim os modelos geram texto cerca de 30 % mais devagar (numa Radeon Pro Vega II Duo: 999 MHz em vez de até 1.730 MHz). Defina o nível de energia como auto e reinicie o Strata.",
+  "s9041": "Como corrigir",
+  "s9042": "Até a próxima reinicialização:",
+  "s9043": "Para manter: encontre a regra do udev que define low e troque \"low\" por \"auto\" nela (ou remova a regra).",
+  "s9044": "Detalhes em docs/MAC_PRO_2019_LINUX.md.",
+  "s9045": "Copiar comando"
 }

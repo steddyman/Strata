@@ -133,6 +133,8 @@ More numbers are in [History](#history--older-measurements).
 The gfx906 build (`STRATA_HIP_GFX906`, the CUDA sources compiled as HIP for wave64) runs this family too. On top of
 the shared engine it has its own decode kernels, the lessons of the Qwen3.8 gfx906 work: a lane group per row, every
 load of a lane issued before its first use, activations in LDS, and a verify window's tokens inside the kernel.
+Measured on a Mac Pro 2019's Radeon Pro Vega II Duo with the GPU power level on `auto`
+([MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md)).
 
 - The packed Q8_0 dense rows: `g906_q8p_kernel` (`STRATA_G906_Q8P=0` turns it off).
 - The FP32 router and GDN alpha / beta rows, the residual norm and the MoE combine: `src/qwen35/q36_g906.cuh`.

@@ -74,6 +74,9 @@ export function pickGpuTemperature(inputs) {
   const chosen=first(/edge|^gpu/i)??ok.find(i=>!i.label)??first(/junction|hotspot/i)??ok.find(i=>!/mem/i.test(i.label??''));
   return chosen?chosen.milli/1000:null;
 }
+/** amdgpu power levels that hold the GPU at its lowest clocks; decode then runs at about two thirds of its speed. */
+export const LOW_CLOCK_LEVELS = ['low', 'profile_min_sclk', 'profile_min_mclk'];
+export function clockPinnedLow(level) { return LOW_CLOCK_LEVELS.includes(String(level ?? '').trim()); }
 export async function detectDrmGpus() {
   const result=[];
   for(const card of (await list('/sys/class/drm')).filter(n=>/^card\d+$/.test(n))) {
@@ -84,7 +87,9 @@ export async function detectDrmGpus() {
     const name=await probe('lspci',['-s',busId]);
     const bytes=number(await read(`${device}/mem_info_vram_total`));
     if(!isComputeAdapter(vendor,bytes))continue;
-    result.push({id:`drm:${busId}`,index:result.length,busId,vendor,name:name.replace(/^[^ ]+\s+[^:]+:\s*/,'')||`${vendor.toUpperCase()} GPU`,vramGb:bytes===null?0:round(bytes/1024**3,1),unified:vendor==='intel'&&!(bytes>0),backend:'vulkan',sensorPath:device});
+    // amdgpu's power level: `low` (often set by a udev rule) holds the shader clock at its lowest step.
+    const clockLevel=vendor==='amd'?await read(`${device}/power_dpm_force_performance_level`):'';
+    result.push({id:`drm:${busId}`,index:result.length,busId,vendor,name:name.replace(/^[^ ]+\s+[^:]+:\s*/,'')||`${vendor.toUpperCase()} GPU`,vramGb:bytes===null?0:round(bytes/1024**3,1),unified:vendor==='intel'&&!(bytes>0),backend:'vulkan',sensorPath:device,...(clockLevel?{clockLevel}:{})});
   }
   return result;
 }
