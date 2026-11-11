@@ -323,7 +323,13 @@ void dot_rows_nt(int nt, const uint8_t* w, size_t row_bytes, int n, const void* 
 // of 64 values in one vector: measured on Zen 5, one-token IQ2_XXS rows 33 -> 45-50 GB/s (16 threads, DRAM-sized), cache-resident 16.8 -> 13.4 ns a block.
 // (AVX512_VPOPCNTDQ + VL: Zen 4, Zen 5, Ice Lake and later; iq512x_supported() asks for it.)
 inline __mmask64 sign_mask_from_idx(__m256i si) {
+#if defined(STRATA_IQ512_CLX)
+    // (the Cascade Lake build, iq_avx512_clx.cpp: no VPOPCNTDQ - the parity of the 7 bits by folding to a nibble and 0x6996's bit for it)
+    const __m256i f = _mm256_and_si256(_mm256_xor_si256(si, _mm256_srli_epi32(si, 4)), _mm256_set1_epi32(15));
+    const __m256i par = _mm256_slli_epi32(_mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32(0x6996), f), _mm256_set1_epi32(1)), 7);
+#else
     const __m256i par = _mm256_slli_epi32(_mm256_and_si256(_mm256_popcnt_epi32(si), _mm256_set1_epi32(1)), 7);
+#endif
     return _cvtu64_mask64((uint64_t) _mm_cvtsi128_si64(_mm256_cvtepi32_epi8(_mm256_or_si256(si, par))));
 }
 inline __m256i sign_idx_xxs(uint32_t lo4, uint32_t hi4) {   // four 7-bit fields of each of two words -> eight dwords
@@ -651,6 +657,23 @@ void iq512_rows(int type, const uint8_t* w, size_t row_bytes, int n, const void*
 }
 
 static bool has_vpopcnt() {
+#if defined(STRATA_IQ512_CLX) && !defined(_MSC_VER)
+    // the Cascade Lake build: what it is compiled for instead - AVX-512 F / DQ / BW / VL / VNNI, BMI2, and the OS keeping the
+    // opmask and zmm state (XCR0 bits 5-7 with 1-2)
+    static const bool clx = [] {
+        unsigned a, b, c, d;
+        __cpuid_count(0, 0, a, b, c, d);
+        if (a < 7) return false;
+        __cpuid_count(1, 0, a, b, c, d);
+        if (!((c >> 27) & 1u)) return false;   // OSXSAVE
+        unsigned lo = 0, hi = 0;
+        __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+        if ((lo & 0xE6u) != 0xE6u) return false;
+        __cpuid_count(7, 0, a, b, c, d);
+        return ((b >> 16) & 1u) && ((b >> 17) & 1u) && ((b >> 30) & 1u) && ((b >> 31) & 1u) && ((b >> 8) & 1u) && ((c >> 11) & 1u);
+    }();
+    return clx;
+#endif
     static const bool ok = [] {
 #if defined(_MSC_VER)
         int r[4];
