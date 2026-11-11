@@ -640,6 +640,12 @@ std::vector<float> rope_freqs(int dim, int original, double base, double factor,
 }
 
 // ------------------------------------------------------------------ devices, layers
+// d.hccnt's words: the per-token block counters, and on gfx906 hc_mix_split_g906_kernel's slice sums after them (kHcS 8 slices)
+#if defined(STRATA_HIP_GFX906)
+constexpr size_t kHccntWords = (size_t) kWin * (1 + 33 * 8);
+#else
+constexpr size_t kHccntWords = (size_t) kWin;
+#endif
 struct Dev {
     int id = 0;
     cudaStream_t st = nullptr;
@@ -675,6 +681,7 @@ struct Dev {
     unsigned ar_seq = 0;
     unsigned* xcnt = nullptr;
     unsigned* hccnt = nullptr;   // [kWin] hc_mix_split's per-token block counters (zeroed at allocation, left zero)
+    // (gfx906: hc_mix_split_g906_kernel's slice sums after the counters, kWin x 33 kHcS words)
     // the head group's members (the last layer's group): each its columns (split128 of V) of the head and the norms;
     // logits_part: a member's share of the logits (the lead's: where the others' land before they join its rows)
     x3::Mat head;
@@ -3285,7 +3292,7 @@ struct Model::Impl {
             }
             if ((int) di == head_dev && !dalloc(d, d.logits, (size_t) kWin * g.vocab, err)) return false;
             if (!halloc(d.bounce, bounce_bytes(), err)) return false;
-            if (!dalloc(d, d.xcnt, 4, err) || !dalloc(d, d.hccnt, kWin, err) || !hmap(d.hand, bounce_bytes(), err) || !hmap(d.hand_flag, 32, err) ||
+            if (!dalloc(d, d.xcnt, 4, err) || !dalloc(d, d.hccnt, kHccntWords, err) || !hmap(d.hand, bounce_bytes(), err) || !hmap(d.hand_flag, 32, err) ||
                 !dalloc(d, d.grp_ptr, P, err) || !dalloc(d, d.grp_start, P + 1, err) || !dalloc(d, d.grp_ent, P, err) ||
                 !dalloc(d, d.n_groups, 4, err))
                 return false;
