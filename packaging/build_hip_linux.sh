@@ -43,7 +43,7 @@ case "$V" in
   *)      ARCHS=${ARCHS:?ARCHS=gfx...} ;;
 esac
 NOTE_EXTRA=""; [ "$V" = rx6000 ] && NOTE_EXTRA=" (built, not tested on a real RX 6000 card)"
-[ "$V" = gfx906 ] && NOTE_EXTRA=" (wave64 gfx906 build: Qwen3.8-Flash-Next and DeepSeek-V4.1-Flash, no Qwen3.6)"
+[ "$V" = gfx906 ] && NOTE_EXTRA=" (wave64 gfx906 build: Qwen3.8-Flash-Next, Qwen3.6-35B-A3B and DeepSeek-V4.1-Flash)"
 # the engine's backend switches: the wave32 HIP backend, or for gfx906 the wave64 build that compiles the CUDA sources as HIP
 ENGINE_DEFS=(-DSTRATA_ENABLE_HIP=ON -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_PREFILL_MMQ=ON)
 [ "$V" = gfx906 ] && ENGINE_DEFS=(-DSTRATA_HIP_GFX906=ON -DCMAKE_C_COMPILER=$HP/llvm/bin/clang -DCMAKE_CXX_COMPILER=$HP/llvm/bin/clang++)

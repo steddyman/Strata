@@ -3135,6 +3135,115 @@ void q8_packed_launch(const Q8Packed& w, const Q81Block* x, float* y, cudaStream
                                                                                     persist ? grid : w.n_out);
 }
 
+#if defined(STRATA_HIP_GFX906)
+// ---- gfx906 packed Q8_0 (STRATA_G906_Q8P=0: native_q8_0_packed_kernel).  The Qwen3.8 gfx906 GEMV pattern on the qs / d
+// planes: LPR lanes a row (g906_lpr: the widest group that divides the row's 32-weight blocks and leaves each lane >= 4),
+// a lane takes whole blocks - two 16-byte loads of qs and the block's fp16 scale - and issues every load of its blocks
+// before the first dot; the activation columns in LDS; the row's sum in its lane group with DPP.  Each column is summed
+// the same way whatever NCOLS is (a verify window's column equals the one-column result, multi_exact holds); the order
+// differs from the exact packed kernel's, so outputs match it to float rounding, not bitwise.
+int g906_q8p_mode = -1;   // -1: STRATA_G906_Q8P on first use; 0 / 1 set by a bench
+bool g906_q8p_on() {
+    if (g906_q8p_mode < 0) { const char* e = std::getenv("STRATA_G906_Q8P"); g906_q8p_mode = (e && e[0] == '0') ? 0 : 1; }
+    return g906_q8p_mode != 0;
+}
+template<int NCOLS, int LPR, int TPL>
+__launch_bounds__(256)
+__global__ void g906_q8p_kernel(const int8_t* __restrict__ qs, const half* __restrict__ dpl, const Q81Block* __restrict__ xg,
+                                float* __restrict__ y, int n_in, int n_out, int rows_per_block) {
+    extern __shared__ int g906_xs8[];
+    const int nb = n_in / 32;
+    {
+        const int words = NCOLS * nb * int(sizeof(Q81Block) / 4);
+        const int* src = reinterpret_cast<const int*>(xg);
+        for (int i = int(threadIdx.x); i < words; i += 256) g906_xs8[i] = src[i];
+    }
+    __syncthreads();
+    const Q81Block* x = reinterpret_cast<const Q81Block*>(g906_xs8);
+    constexpr int GPB = 256 / LPR;
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int row_beg = int(blockIdx.x) * rows_per_block;
+    const int row_end = min(n_out, row_beg + rows_per_block);
+    for (int rb = row_beg; rb < row_end; rb += GPB) {
+        const int row = rb + grp;
+        const bool live = row < row_end;
+        float tmp[NCOLS] = {};
+        if (live) {
+            g906_v4a q[TPL][2];
+            float dw[TPL];
+            const int8_t* rq = qs + std::size_t(row) * n_in;
+            const half* rd = dpl + std::size_t(row) * nb;
+#pragma unroll
+            for (int i = 0; i < TPL; ++i) {
+                const int kb = lane + i * LPR;
+                const g906_v4a* p = reinterpret_cast<const g906_v4a*>(rq + 32 * kb);
+                q[i][0] = p[0];
+                q[i][1] = p[1];
+                dw[i] = __half2float(rd[kb]);
+            }
+            // every load of the lane issued before the first dot: the empty asm takes all the registers at once
+            // (without it the compiler moves each load beside its use and waits on it there)
+#pragma unroll
+            for (int i = 0; i < TPL; ++i) asm volatile("" : "+v"(q[i][0]), "+v"(q[i][1]));
+#pragma unroll
+            for (int i = 0; i < TPL; ++i) {
+                const int kb = lane + i * LPR;
+#pragma unroll
+                for (int c = 0; c < NCOLS; ++c) {
+                    const Q81Block* xb = x + c * nb + kb;
+                    const g906_v4a u0 = *reinterpret_cast<const g906_v4a*>(xb->qs);
+                    const g906_v4a u1 = *reinterpret_cast<const g906_v4a*>(xb->qs + 16);
+                    int dot = 0;
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A(q[i][0][k], u0[k], dot);
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = STRATA_DP4A(q[i][1][k], u1[k], dot);
+                    tmp[c] += dw[i] * __low2float(xb->ds) * float(dot);
+                }
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < NCOLS; ++c) {
+            const float v = g906_group_sum_dpp<LPR>(tmp[c]);
+            if (live && lane == LPR - 1) y[std::size_t(c) * n_out + row] = v;
+        }
+    }
+}
+// LPR and the blocks a lane takes (TPL) from the row's block count (nb = LPR * TPL); one row a lane group (q8p_bench,
+// Vega II: 8192 x 2048 T1 28.5 -> 26.9 us against doubling the rows while >= 256 blocks remain), 64 rows a block for
+// the head's 4+ columns (248320 x 2048 T8 1254 -> 974 us).  STRATA_G906_Q8P_LPR / _RPB: other choices, for the bench.
+template<int NCOLS>
+bool g906_q8p_launch(const int8_t* qs, const half* d, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
+    const int nb = n_in / 32;
+    static const int rpb_env = [] { const char* e = std::getenv("STRATA_G906_Q8P_RPB"); return e ? std::atoi(e) : 0; }();
+    static const int lpr_env = [] { const char* e = std::getenv("STRATA_G906_Q8P_LPR"); return e ? std::atoi(e) : 0; }();
+    auto go = [&](auto kern, int lpr) {
+        int rpb = rpb_env > 0 ? rpb_env : (NCOLS >= 4 && n_out >= 65536) ? 64 : 256 / lpr;
+        const unsigned nblk = unsigned((n_out + rpb - 1) / rpb);
+        kern<<<nblk, 256, std::size_t(NCOLS) * nb * sizeof(Q81Block), s>>>(qs, d, x, y, n_in, n_out, rpb);
+        return true;
+    };
+#define STRATA_Q8P(L) go(g906_q8p_kernel<NCOLS, L, (nb / L > 0 ? nb / L : 1)>, L)
+    switch (nb) {
+        case 16: return go(g906_q8p_kernel<NCOLS, 16, 1>, 16);
+        case 32: return go(g906_q8p_kernel<NCOLS, 8, 4>, 8);
+        case 64:
+            if (lpr_env == 8) return go(g906_q8p_kernel<NCOLS, 8, 8>, 8);
+            if (lpr_env == 32) return go(g906_q8p_kernel<NCOLS, 32, 2>, 32);
+            return go(g906_q8p_kernel<NCOLS, 16, 4>, 16);
+        case 96: return go(g906_q8p_kernel<NCOLS, 32, 3>, 32);
+        case 128:
+            if (lpr_env == 16) return go(g906_q8p_kernel<NCOLS, 16, 8>, 16);
+            if (lpr_env == 64) return go(g906_q8p_kernel<NCOLS, 64, 2>, 64);
+            return go(g906_q8p_kernel<NCOLS, 32, 4>, 32);
+        case 192: return go(g906_q8p_kernel<NCOLS, 64, 3>, 64);
+        case 256: return go(g906_q8p_kernel<NCOLS, 64, 4>, 64);
+        default: return false;
+    }
+#undef STRATA_Q8P
+}
+#endif
+
 bool q8_packed_shape(int n_in, int n_out) {   // the shapes native_q8_0_packed_kernel was measured on
     return n_in > 0 && n_in % 32 == 0 && n_in / 32 >= 2 * WARPS * WARP / 8 && n_in <= Q8P_PERSIST_MAX_IN &&
            n_out >= 2048;
@@ -3176,6 +3285,26 @@ bool q8_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
     validate_stream(stream);
     const auto* x = static_cast<const Q81Block*>(x_q8_1);
     const auto s = static_cast<cudaStream_t>(stream);
+#if defined(STRATA_HIP_GFX906)
+    if (g906_q8p_on() && ncols >= 1 && ncols <= 8) {
+        const Q8Packed& w = found->second;
+        bool ok = false;
+        switch (ncols) {
+            case 1: ok = g906_q8p_launch<1>(w.qs, w.d, x, y, n_in, n_out, s); break;
+            case 2: ok = g906_q8p_launch<2>(w.qs, w.d, x, y, n_in, n_out, s); break;
+            case 3: ok = g906_q8p_launch<3>(w.qs, w.d, x, y, n_in, n_out, s); break;
+            case 4: ok = g906_q8p_launch<4>(w.qs, w.d, x, y, n_in, n_out, s); break;
+            case 5: ok = g906_q8p_launch<5>(w.qs, w.d, x, y, n_in, n_out, s); break;
+            case 6: ok = g906_q8p_launch<6>(w.qs, w.d, x, y, n_in, n_out, s); break;
+            case 7: ok = g906_q8p_launch<7>(w.qs, w.d, x, y, n_in, n_out, s); break;
+            default: ok = g906_q8p_launch<8>(w.qs, w.d, x, y, n_in, n_out, s); break;
+        }
+        if (ok) {
+            launch_check();
+            return true;
+        }
+    }
+#endif
     switch (ncols) {
         case 1: q8_packed_launch<1>(found->second, x, y, s); break;
         case 2: q8_packed_launch<2>(found->second, x, y, s); break;
@@ -3350,6 +3479,9 @@ bool q6_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
     return true;
 }
 } // namespace
+#if defined(STRATA_HIP_GFX906)
+void native_g906_q8p_set(int mode) { g906_q8p_mode = mode; }   // tools: STRATA_G906_Q8P from a bench (-1: the environment again)
+#endif
 
 bool native_q8_0_packed_enabled() {
     static const bool enabled = [] {

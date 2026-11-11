@@ -28,6 +28,7 @@
 #include "strata/qwen35/engine.hpp"
 #include "strata/qwen35/sampling.hpp"
 #include "q36_kernels.cuh"
+#include "q36_g906.cuh"
 #if defined(STRATA_Q36_CPU_POOL)
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/pool.hpp"
@@ -338,6 +339,90 @@ __global__ void k_attn_part(const float* q, const float* kc, const float* vc, co
         pl[o] = l;
     }
 }
+#if defined(STRATA_HIP_GFX906)
+/// k_attn_part for gfx906 (STRATA_Q36_G906=0: k_attn_part): the scores with 16 lanes a cell (a lane 16 of the 256 dims,
+/// the cell's 1 KB K row read whole by its lane group, the sum within the 16 lanes), 16 cells at a time and four cells a
+/// group's loads in flight, instead of a thread a cell walking its row; the chunk's max and sum from wavefront sums.  The
+/// V sums as k_attn_part's (a thread a dim).  The same partials (accumulator, max, sum) for k_attn_merge; the scores
+/// match k_attn_part's to float rounding.
+__device__ __forceinline__ float g906_sum16(float v) {
+#pragma unroll
+    for (int m = 8; m > 0; m >>= 1) v += __shfl_xor(v, m, 16);
+    return v;
+}
+__global__ void __launch_bounds__(256) k_attn_part_g906(const float* q, const float* kc, const float* vc, const int32_t* pos0,
+                                                        int t0, int H, int HKV, int ctx, float scale, int n_chunk, float* pacc,
+                                                        float* pm, float* pl, RowSel rs) {
+    constexpr int HD = 256;
+    __shared__ float sc[kChunkCells];
+    __shared__ float red[2][4];
+    const int c = blockIdx.x, row = blockIdx.y;
+    const int t = t0 + row / H, h = row % H, kvh = h / (H / HKV);
+    const int npos = (rs.cell ? rs.cell[t] : *pos0 + t) + 1;
+    if (rs.kc) {
+        kc = rs.kc[rs.slot[t]];
+        vc = rs.vc[rs.slot[t]];
+    }
+    const int p0 = c * kChunkCells;
+    if (p0 >= npos) return;
+    const int n = min(kChunkCells, npos - p0);
+    const int j = threadIdx.x, g = j >> 4, l = j & 15;
+    const float4* qp = (const float4*) (q + ((size_t) t * H + h) * HD) + 4 * l;
+    const float4 q0 = qp[0], q1 = qp[1], q2 = qp[2], q3 = qp[3];
+    const float* kb = kc + ((size_t) kvh * ctx + p0) * HD;
+    for (int cb = g; cb < n; cb += 64) {   // cells cb, cb + 16, cb + 32, cb + 48 of this group
+        float4 k[4][4];
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            const int cc = min(cb + 16 * u, n - 1);
+            const float4* kp = (const float4*) (kb + (size_t) cc * HD) + 4 * l;
+#pragma unroll
+            for (int v = 0; v < 4; ++v) k[u][v] = kp[v];
+        }
+        float a[4];
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            a[u] = q0.x * k[u][0].x + q0.y * k[u][0].y + q0.z * k[u][0].z + q0.w * k[u][0].w +
+                   q1.x * k[u][1].x + q1.y * k[u][1].y + q1.z * k[u][1].z + q1.w * k[u][1].w +
+                   q2.x * k[u][2].x + q2.y * k[u][2].y + q2.z * k[u][2].z + q2.w * k[u][2].w +
+                   q3.x * k[u][3].x + q3.y * k[u][3].y + q3.z * k[u][3].z + q3.w * k[u][3].w;
+        }
+#pragma unroll
+        for (int m = 8; m > 0; m >>= 1)
+#pragma unroll
+            for (int u = 0; u < 4; ++u) a[u] += __shfl_xor(a[u], m, 16);
+        if (l == 0)
+#pragma unroll
+            for (int u = 0; u < 4; ++u)
+                if (cb + 16 * u < n) sc[cb + 16 * u] = a[u] * scale;
+    }
+    __syncthreads();
+    const float sj = j < n ? sc[j] : -INFINITY;
+    float wm = sj;
+#pragma unroll
+    for (int m = 32; m > 0; m >>= 1) wm = fmaxf(wm, __shfl_xor(wm, m, 64));
+    if ((j & 63) == 0) red[0][j >> 6] = wm;
+    __syncthreads();
+    const float mx = fmaxf(fmaxf(red[0][0], red[0][1]), fmaxf(red[0][2], red[0][3]));
+    const float e = j < n ? expf(sj - mx) : 0.f;
+    sc[j] = e;
+    float ws = e;
+#pragma unroll
+    for (int m = 32; m > 0; m >>= 1) ws += __shfl_xor(ws, m, 64);
+    if ((j & 63) == 0) red[1][j >> 6] = ws;
+    __syncthreads();
+    const float lsum = red[1][0] + red[1][1] + red[1][2] + red[1][3];
+    float acc = 0.f;
+    const float* vp = vc + ((size_t) kvh * ctx + p0) * HD + j;
+    for (int k = 0; k < n; ++k) acc += sc[k] * vp[(size_t) k * HD];
+    const size_t o = (size_t) row * n_chunk + c;
+    pacc[o * HD + j] = acc;
+    if (j == 0) {
+        pm[o] = mx;
+        pl[o] = lsum;
+    }
+}
+#endif
 /// The chunks merged, times sigmoid(gate): grid (n_rows), block HD.
 __global__ void k_attn_merge(const float* pacc, const float* pm, const float* pl, const float* gate,
                              const int32_t* pos0, int t0, int H, int n_chunk, float* out, RowSel rs) {
@@ -1533,6 +1618,9 @@ struct Engine {
     /// cuBLAS's FP32 GEMM (the router and the GDN alpha / beta stay in FP32, as llama.cpp keeps them).
     void f32mm(const float* W, const float* xin, float* out, int n_in, int n_out, int T) {
         if (T <= kGemmT) {
+#if defined(STRATA_HIP_GFX906)
+            if (q36g::gemv_f32<0>(W, nullptr, xin, out, nullptr, n_in, n_out, T, nullptr, nullptr, 0, st)) return;
+#endif
             k_gemv_f32<<<dim3(rows8(n_out), T), kThreads, 0, st>>>(W, xin, out, n_in, n_out);
             return;
         }
@@ -1685,6 +1773,10 @@ struct Engine {
                 CK(cudaMemcpyAsync(vx_, x, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, st));
                 k_add_rms<<<T, kThreads, 0, st>>>(vx_, y, L.post_norm, vh_, N, m->eps);
             }
+#if defined(STRATA_HIP_GFX906)
+            if (q36g::on() && N == 2048) q36g::k_add_rms_q<<<T, 1024, 0, st>>>(x, y, L.post_norm, h, (q36k::QB*) xq, m->eps);
+            else
+#endif
             q36k::k_add_rms_q<<<T, 256, 0, st>>>(x, y, L.post_norm, h, (q36k::QB*) xq, N, m->eps);
             xq_post = true;
             if (verify_k) {
@@ -1851,6 +1943,12 @@ struct Engine {
         }
         if (small) {
             const bool mkq = wn != nullptr && hout == h;   // the next layer's input, quantized here
+#if defined(STRATA_HIP_GFX906)
+            if (q36g::on() && N == 2048)
+                q36g::k_moe_out_small<<<T, 1024, 0, st>>>(x, eparts, prow, ewts, Kp, shared, sgate, sgs, wn, hout, m->eps,
+                                                          mkq ? (q36k::QB*) xq : nullptr);
+            else
+#endif
             q36k::k_moe_out_small<<<T, 1024, 0, st>>>(x, eparts, prow, ewts, Kp, shared, sgate, sgs, wn, hout, N, m->eps,
                                                       mkq ? (q36k::QB*) xq : nullptr);
             xq_ready = mkq;
@@ -1894,6 +1992,9 @@ struct Engine {
             apply(L.qkv, xq, qkv_b, T);
             apply(L.zg, xq, z, T);
             if (T <= kGemmT) {
+#if defined(STRATA_HIP_GFX906)
+                if (!q36g::gemv_f32<1>(L.alpha, L.beta, h, al_b, be_b, N, 2 * HV, T, L.dt, L.ssm_a, HV, st))
+#endif
                 k_gdn_ab<<<dim3(rows8(2 * HV), T), kThreads, 0, st>>>(L.alpha, L.beta, h, L.dt, L.ssm_a, al_b, be_b, N,
                                                                       HV);
             } else {
@@ -1991,6 +2092,13 @@ struct Engine {
                     const int nt = std::min(rows_per, T - t0);
                     const int nc = graph_mode ? n_chunk
                                               : (int) std::min<int64_t>(n_chunk, (p0 + t0 + nt + kChunkCells - 1) / kChunkCells);
+#if defined(STRATA_HIP_GFX906)
+                    if (q36g::on() && HD == 256)
+                        k_attn_part_g906<<<dim3(nc, nt * H), kChunkCells, 0, st>>>(q, rows_mode ? nullptr : kc[li],
+                                                                             rows_mode ? nullptr : vc[li], dpos, t0, H, HKV, ctx,
+                                                                             1.0f / sqrtf((float) HD), n_chunk, pacc, pm, pl, rs);
+                    else
+#endif
                     k_attn_part<<<dim3(nc, nt * H), kChunkCells, 0, st>>>(q, rows_mode ? nullptr : kc[li],
                                                                          rows_mode ? nullptr : vc[li], dpos, t0, H, HKV, ctx,
                                                                          1.0f / sqrtf((float) HD), n_chunk, pacc, pm, pl, rs);

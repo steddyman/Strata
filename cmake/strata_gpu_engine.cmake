@@ -493,10 +493,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings ${_strata_gpu_runtime_target})
   # the engine path for the same family (serve protocol, prompt chunks, decode graph): src/qwen35/q36_engine.cu, a
   # library that `strata` switches to for a qwen35moe model (the family switch at the top of its main) and that
-  # strata-q36 wraps on its own.  Not on gfx906 (#3172, #3271): it calls cuBLAS entry points the wave64 compat layer does
-  # not map (cublasSgemm, cublasGemmStridedBatchedEx) and its kernels assume 32-lane warps; main() guards every use with
-  # STRATA_HAVE_QWEN35, so a gfx906 build links and runs the Qwen3.8 family, and `strata --families` says so
-  if(NOT STRATA_HIP_GFX906)
+  # strata-q36 wraps on its own.  On gfx906 the wave64 compat layer maps its cuBLAS entry points (cublasSgemm,
+  # cublasGemmStridedBatchedEx) and keeps its 32-lane shuffles in 32-lane halves; STRATA_GFX906_NO_Q36=ON leaves it out.
+  option(STRATA_GFX906_NO_Q36 "Leave the Qwen3.6 engine out of a gfx906 build" OFF)
+  if(NOT (STRATA_HIP_GFX906 AND STRATA_GFX906_NO_Q36))
   add_library(strata_qwen35 STATIC src/qwen35/q36_engine.cu)
   target_include_directories(strata_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_kernels strata_warnings ${_strata_gpu_runtime_target})

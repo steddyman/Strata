@@ -24,3 +24,6 @@
 #define CUBLAS_DEFAULT_MATH 0
 #define cublasSetMathMode(handle, mode) HIPBLAS_STATUS_SUCCESS
 #define cublasSetWorkspace(handle, ptr, bytes) HIPBLAS_STATUS_SUCCESS
+// the Qwen3.6 engine's FP32 prompt products and its FP16 prompt attention (src/qwen35/q36_engine.cu)
+#define cublasSgemm hipblasSgemm
+#define cublasGemmStridedBatchedEx hipblasGemmStridedBatchedEx
