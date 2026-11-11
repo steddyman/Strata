@@ -155,8 +155,34 @@ computed as a single token is, so the MTP drafts still give exactly the plain gr
 | Mean KL against llama.cpp CPU (64 teacher-forced steps a prompt) | 4.1e-3 | 3.3e-3 |
 | Plain greedy text with MTP drafts | 10 of 10 the same | 10 of 10 the same |
 
-The engine runs on one GPU: UD-Q4_K_XL fits a 32 GB die with every expert in VRAM. UD-Q6_K_XL and Q8_0 do not, and run
-in the hybrid mode (the rest of the experts on the CPU).
+UD-Q4_K_XL fits a 32 GB die with every expert in VRAM. UD-Q6_K_XL and Q8_0 do not fit one die. On two dies (a Vega II
+Duo, two MI50s) they run as a layer split, below.
+
+### Two GPUs (layer split)
+
+With two cards set to Main and Helper (the app's graphics-card choice, or `strata launch --gpu-roles`), the server
+starts the engine with both cards visible and `--layer-split auto`. The first layers run on the Helper card. The rest,
+the MTP block and the head run on the Main card. `auto` picks the boundary that leaves both cards about the same free
+memory; `--layer-split N` (the `"layer_split"` setting) makes layer N the Main card's first.
+
+Each card keeps its own working buffers. At the boundary the Main card copies three small rows from the Helper card
+(the residual, the normed input and its 8-bit image, about 10 KB a token) over the peer link. Every expert must fit in
+VRAM: a split has no CPU expert mode. Setup writes a split for Qwen3.6 on gfx906 cards (elsewhere
+`STRATA_Q36_SPLIT=1`). A split gives the same bits as one card for the same file.
+
+> **Measured on:** a Radeon Pro Vega II Duo (two gfx906 dies, 32 GB each, XGMI link), the 10 parity prompts, greedy,
+> 128K context.
+
+| | UD-Q4_K_XL, one die | UD-Q4_K_XL, split | Q8_0, split |
+| --- | ---: | ---: | ---: |
+| Decode, no drafts | 114 tok/s | 106 | 102 |
+| Decode, MTP drafts | 128 to 196 | 115 to 188 | 107 to 160 |
+| Prompt pp4096 | 1,345 | 1,318 | 1,182 |
+| Mean KL against llama.cpp CPU | 3.3e-3 | the same bits as one die | 3.8e-3 |
+| Plain greedy text with MTP drafts | 10 of 10 | 10 of 10 | 10 of 10 |
+
+Three requests at once on the split (`--batch 3`) give the same text as each alone, and a 3,000-token prompt admitted
+while two others decode does too.
 
 ## Limits
 

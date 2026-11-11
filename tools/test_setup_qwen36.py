@@ -119,10 +119,23 @@ class InstallOwnPath(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def install(self, ram=64.0, vram=16.0, hip=False, **kw):
-        gpu = {"index": 0, "count": 1, "vram_gb": vram, "name": "Test GPU"}
+    def install(self, ram=64.0, vram=16.0, hip=False, gpu=None, multi=(), **kw):
+        gpu = gpu or {"index": 0, "count": 1, "vram_gb": vram, "name": "Test GPU"}
         return run(setup.install_own_path, args(models_dir=str(self.root / "models"), **kw), "qwen36", gpu, hip, [],
-                   13, [], 8080, ram, None)
+                   13, list(multi), 8080, ram, None)
+
+    def test_two_gfx906_dies_split_the_layers_other_cards_keep_one(self):
+        vega = {"index": 1, "count": 2, "vram_gb": 32.0, "name": "Vega II", "arch": "gfx906", "archs": ["gfx906"]}
+        rc, out = self.install(model="Q8_0", hip=True, gpu=vega, multi=[0, 1], vision="no", ram=184.0)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self.cfg["gpu"], self.cfg["layer_split"]), ([0, 1], "auto"))
+        self.assertNotIn("one GPU so far", out)
+        rdna = {"index": 1, "count": 2, "vram_gb": 32.0, "name": "R9700", "arch": "gfx1201", "archs": ["gfx1201"]}
+        rc, out = self.install(model="Q8_0", hip=True, gpu=rdna, multi=[0, 1], vision="no", ram=184.0)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.cfg["gpu"], 1)
+        self.assertNotIn("layer_split", self.cfg)
+        self.assertIn("one GPU so far", out)
 
     def test_installs_the_pinned_file_and_writes_the_config(self):
         rc, out = self.install(model="UD-Q4_K_XL", vision="no")
