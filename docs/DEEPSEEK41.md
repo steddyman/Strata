@@ -258,7 +258,10 @@ What is different on gfx906:
   against ggml before use: 12.0 → 10.5 ms a token.
 
 Measured on a Mac Pro 2019 (2x 32 GB Vega 20, Xeon W-3245, 192 GB DDR4-2933, GPU power level `auto`), ISTA-DAS 2.00 bpw
-general set: **~29 tok/s** at 8K context with drafting off, ~20 tok/s at 128K in the app. DSpark is slower here (13–21
+general set: **~29 tok/s** at 8K context with drafting off, ~20 tok/s at 128K in the app; prompts read at 143 tok/s
+(3.8K tokens) and 159 tok/s (13.9K) since 0.1.59.19, which streams each die's share of an expert's down matrix as the whole
+matrix and cuts it on the GPU (a 2D copy of its short rows ran at 0.05 GB/s on gfx906: 22 tok/s before;
+`DS4_DOWN_BOUNCE=0` restores it). DSpark is slower here (13–21
 tok/s: each drafted token roughly triples the CPU lane's expert work), so set Drafting to **Off**. More, including the clock
 setting: [MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md).
 

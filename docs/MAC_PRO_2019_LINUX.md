@@ -114,11 +114,17 @@ not measured end to end. How it was done: [GFX906_KERNEL_PLAN.md](GFX906_KERNEL_
 
 ### DeepSeek-V4.1-Flash (both dies, tensor parallel, ISTA-DAS 2.00 bpw general set)
 
-| | Decode |
-| --- | ---: |
-| 8K context, drafting **Off** | **~29 tok/s** |
-| 128K context, in the app | ~20 tok/s |
-| First run on gfx906 (layer split) | 19–21 tok/s |
+| | Decode | Prompt (3.8K / 13.9K tokens) |
+| --- | ---: | ---: |
+| 8K context, drafting **Off** | **~29 tok/s** | **143 / 159 tok/s** (engine 0.1.59.19) |
+| 128K context, in the app | ~20 tok/s | |
+| Engine 0.1.59.18 | | 22 / ~36 tok/s |
+| First run on gfx906 (layer split) | 19–21 tok/s | |
+
+- **Prompts:** up to 0.1.59.18 each die's share of every streamed expert's down matrix crossed PCIe as 4,096 short rows,
+  a copy that runs at 0.05 GB/s on gfx906, so a 3,000-token prompt waited ~2.5 minutes. 0.1.59.19 copies the whole
+  matrix (13 GB/s) and cuts the share out on the GPU (`DS4_DOWN_BOUNCE=0` restores the old copy). What's left is mostly
+  the FP32 expert kernels (~40 % of a die's time), the two dies waiting on each other at each layer's sum, and attention.
 
 - About 50 GB of the 132 GB of experts sit in VRAM; the rest run on the Xeon's AVX-512 (a Cascade Lake build of the i-quant
   kernels, since the W-3245 lacks VBMI / VPOPCNTDQ). The Engram table is read from the SSD. This is why it needs the 192 GB.
@@ -141,8 +147,9 @@ Run on 12 November 2026 with the engines above, both dies, GPU power level `auto
 
 The functional checks are instruction following (JSON and exact text), retrieval from 4K and 16K prompts, and tool
 calls ([BENCHMARK_PROTOCOL.md](BENCHMARK_PROTOCOL.md)). The benchmark's speeds at 4K / 16K prompts: Qwen3.6 Q8_0
-reads 1,073 / 899 tok/s and decodes 84 / 47 tok/s; Qwen3.8 IQ3_XXS reads 475 / 661 and decodes 78 / 72; DeepSeek reads
-only 19 / 36 tok/s (a 3,000-token prompt waits about 2.5 minutes for its first token) and decodes 28 at every length.
+reads 1,073 / 899 tok/s and decodes 84 / 47 tok/s; Qwen3.8 IQ3_XXS reads 475 / 661 and decodes 78 / 72; DeepSeek read
+only 19 / 36 tok/s on engine 0.1.59.18 (a 3,000-token prompt waited about 2.5 minutes for its first token; 143 / 159 tok/s
+since 0.1.59.19, see above) and decodes 28 at every length.
 
 To repeat the DeepSeek check (the reference needs `torch` (CPU) and llama.cpp's `gguf-py`; one pass of 428 tokens took
 72 minutes and ~35 GB of RAM):
