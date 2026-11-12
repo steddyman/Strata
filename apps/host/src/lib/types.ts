@@ -35,6 +35,8 @@ export interface GpuInfo {
   unified: boolean;
   backend: 'metal' | 'cuda' | 'rocm' | 'vulkan' | 'cpu';
   driver?: string;
+  /** Linux amdgpu `power_dpm_force_performance_level` (auto, low, high, manual, ...). */
+  clockLevel?: string;
 }
 
 export interface Hardware {

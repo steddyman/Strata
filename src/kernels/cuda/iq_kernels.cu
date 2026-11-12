@@ -6533,6 +6533,241 @@ __global__ void __launch_bounds__(256) __attribute__((amdgpu_waves_per_eu(STRATA
 #endif
 
 #if defined(STRATA_HIP_GFX906)
+// ---- gfx906 K-quant experts (Unsloth's UD-Q4_K_XL: Q4_K / Q5_K gate+up, Q5_K down; STRATA_G906_KQ=0: the CUDA layout and its
+// separate SwiGLU / q8_1 launches).  The g906 dense K-quant GEMV's lane task (native_mmvq.cu g906_q4k_kernel): 64 values of
+// one 256-value block (sub-blocks 2j, 2j + 1) from its 16-byte header and 32 qs bytes (+ the 32 qh bytes for Q5_K), all of a
+// lane's task loads issued before the first decode; each task decoded once and applied to every entry of the group (a
+// verify window's tokens); the activations and their q8_1 integer sums in LDS; a row's sum in its lane group.
+// g906_kq_gu_kernel: a block computes 32 gate and 32 up rows of one expert and writes the q8_1 block of h they make
+// (SwiGLU + q8_1 in the block: mode 8's epilogue), so the gate / up floats and two launches are gone.
+// g906_kq_down_kernel: the down rows into out[ent_dst].  Each entry's sums are computed the same way whatever the number of
+// entries (a verify window's column equals the one-token result); the float order differs from the CUDA layout's
+// (rounding-level, as the dense g906 kernels).
+typedef int kq_v4 __attribute__((ext_vector_type(4), aligned(4)));
+template<int TG> struct KQRaw { kq_v4 hdr, q0, q1; };
+template<> struct KQRaw<13> { kq_v4 hdr, q0, q1, h0, h1; };
+template<int TG> struct KQB;
+template<> struct KQB<12> { static constexpr int BS = 144, QS = 16; };   // block_q4_K: d, dmin, scales[12], qs[128]
+template<> struct KQB<13> { static constexpr int BS = 176, QS = 48; };   // block_q5_K: d, dmin, scales[12], qh[32], qs[128]
+template<int TG>
+__device__ __forceinline__ void kq_load(const uint8_t* b, int j, KQRaw<TG>& r) {
+    r.hdr = *(const kq_v4*) b;
+    r.q0 = *(const kq_v4*) (b + KQB<TG>::QS + 32 * j);
+    r.q1 = *(const kq_v4*) (b + KQB<TG>::QS + 32 * j + 16);
+    if constexpr (TG == 13) {
+        r.h0 = *(const kq_v4*) (b + 16);
+        r.h1 = *(const kq_v4*) (b + 32);
+    }
+}
+template<int TG>
+__device__ __forceinline__ void kq_hold(KQRaw<TG>& r) {
+    asm volatile("" : "+v"(r.hdr), "+v"(r.q0), "+v"(r.q1));
+    if constexpr (TG == 13) asm volatile("" : "+v"(r.h0), "+v"(r.h1));
+}
+/// task j's two sub-blocks as 8 ints of 4 unsigned values each, their 6-bit scales and mins, and (d, dmin)
+template<int TG>
+__device__ __forceinline__ void kq_decode(const KQRaw<TG>& r, int j, int (&v)[2][8], int (&sc)[2], int (&mn)[2], float2& dm) {
+    dm = __half22float2(__builtin_bit_cast(half2, r.hdr[0]));
+    const unsigned s0 = unsigned(r.hdr[1]), s1 = unsigned(r.hdr[2]), s2 = unsigned(r.hdr[3]);
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+        const int sb = 2 * j + h, k = sb & 3, sh = 8 * k;
+        const unsigned b0 = (s0 >> sh) & 0xffu, b1 = (s1 >> sh) & 0xffu, b2 = (s2 >> sh) & 0xffu;
+        if (sb < 4) { sc[h] = int(b0 & 63u); mn[h] = int(b1 & 63u); }
+        else {
+            sc[h] = int((b2 & 0x0fu) | ((b0 >> 6) << 4));
+            mn[h] = int((b2 >> 4) | ((b1 >> 6) << 4));
+        }
+    }
+    const int qv[8] = {r.q0[0], r.q0[1], r.q0[2], r.q0[3], r.q1[0], r.q1[1], r.q1[2], r.q1[3]};
+#pragma unroll
+    for (int h = 0; h < 2; ++h)
+#pragma unroll
+        for (int k = 0; k < 8; ++k) v[h][k] = (qv[k] >> (4 * h)) & 0x0f0f0f0f;
+    if constexpr (TG == 13) {
+        const int hv[8] = {r.h0[0], r.h0[1], r.h0[2], r.h0[3], r.h1[0], r.h1[1], r.h1[2], r.h1[3]};
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+#pragma unroll
+            for (int k = 0; k < 8; ++k) v[h][k] |= ((hv[k] >> (2 * j + h)) << 4) & 0x10101010;
+    }
+}
+/// The activations of `n` entries (q8_1 rows of xb blocks from src(e)) into LDS, then each block's integer sum
+template<typename Src>
+__device__ __forceinline__ void kq_stage_x(int* sx, int* isum, int n, int xb, Src src) {
+    const int words = xb * 9;
+    for (int c = 0; c < n; ++c) {
+        const int* s = (const int*) src(c);
+        for (int i = int(threadIdx.x); i < words; i += 256) sx[c * words + i] = s[i];
+    }
+    __syncthreads();
+    for (int b = int(threadIdx.x); b < n * xb; b += 256) {
+        const int* q = (const int*) ((const block_q8_1*) sx)[b].qs;
+        int a = 0;
+#pragma unroll
+        for (int k = 0; k < 8; ++k) a = ggml_cuda_dp4a(0x01010101, q[k], a);
+        isum[b] = a;
+    }
+    __syncthreads();
+}
+/// One row's partial sums over a lane's tasks t = lane, lane + LPR, ... (< 4 * bpr) for NC entries; TPL tasks hoisted at once
+template<int TG, int LPR, int NC, int TPL = 4>
+__device__ __forceinline__ void kq_row(const uint8_t* row, int bpr, int lane, const block_q8_1* x, const int* isum, int xb,
+                                       float (&tmp)[NC]) {
+    const int nt = 4 * bpr;
+    for (int t0 = lane; t0 < nt; t0 += TPL * LPR) {
+        KQRaw<TG> r[TPL];
+#pragma unroll
+        for (int i = 0; i < TPL; ++i) {
+            const int t = min(t0 + i * LPR, nt - 1);
+            kq_load<TG>(row + (size_t) (t >> 2) * KQB<TG>::BS, t & 3, r[i]);
+        }
+#pragma unroll
+        for (int i = 0; i < TPL; ++i) kq_hold<TG>(r[i]);
+#pragma unroll
+        for (int i = 0; i < TPL; ++i) {
+            const int t = t0 + i * LPR;
+            if (t >= nt) break;
+            const int kb = t >> 2, j = t & 3;
+            int v[2][8], sc[2], mn[2];
+            float2 dm;
+            kq_decode<TG>(r[i], j, v, sc, mn, dm);
+#pragma unroll
+            for (int c = 0; c < NC; ++c) {
+                float sd = 0.0f, sm = 0.0f;
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int qb = c * xb + kb * 8 + 2 * j + h;
+                    const block_q8_1* xk = x + qb;
+                    const kq_v4 u0 = *(const kq_v4*) xk->qs, u1 = *(const kq_v4*) (xk->qs + 16);
+                    int dot = 0;
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = ggml_cuda_dp4a(v[h][k], u0[k], dot);
+#pragma unroll
+                    for (int k = 0; k < 4; ++k) dot = ggml_cuda_dp4a(v[h][4 + k], u1[k], dot);
+                    const float d8 = __low2float(xk->ds);
+                    sd += d8 * (float) (dot * sc[h]);
+                    sm += d8 * (float) (isum[qb] * mn[h]);
+                }
+                tmp[c] += dm.x * sd - dm.y * sm;
+            }
+        }
+    }
+}
+template<int LPR>
+__device__ __forceinline__ float kq_group_sum(float v) {
+#pragma unroll
+    for (int m = LPR / 2; m > 0; m >>= 1) v += __shfl_xor(v, m, LPR);
+    return v;
+}
+constexpr int KQ_NT = 4;   // entries a pass (a group has at most one entry a token of the window)
+template<int TG>
+__global__ void __launch_bounds__(256) g906_kq_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                         const int32_t* __restrict__ grp_start, const int32_t* __restrict__ n_groups,
+                                                         const int32_t* __restrict__ ent_tok, const block_q8_1* __restrict__ xq,
+                                                         NativeExpertLayout L, block_q8_1* __restrict__ hq) {
+    constexpr int LPR = 8, GPB = 256 / LPR;   // 32 row groups: a pass is 32 gate or 32 up rows
+    __shared__ float res[KQ_NT][64];
+    extern __shared__ int kq_sx[];
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int xb = (int) (L.n_embd / 32), hb = (int) (L.n_ff / 32), bpr = (int) (L.n_embd / 256);
+    int* isum = kq_sx + KQ_NT * xb * 9;
+    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int r = int(blockIdx.x) * 32 + grp;
+    for (int c0 = e0; c0 < e1; c0 += KQ_NT) {
+        const int cn = min(KQ_NT, e1 - c0);
+        __syncthreads();
+        kq_stage_x(kq_sx, isum, cn, xb, [&](int c) { return xq + (size_t) ent_tok[c0 + c] * xb; });
+        const block_q8_1* x = (const block_q8_1*) kq_sx;
+#pragma unroll 1
+        for (int p = 0; p < 2; ++p) {
+            const uint8_t* row = blob + (p ? L.up_off : (size_t) 0) + (size_t) r * L.gu_row;
+            auto go = [&](auto ncc) {
+                constexpr int NC = decltype(ncc)::value;
+                float tmp[NC] = {};
+                kq_row<TG, LPR, NC>(row, bpr, lane, x, isum, xb, tmp);
+#pragma unroll
+                for (int c = 0; c < NC; ++c) {
+                    const float v = kq_group_sum<LPR>(tmp[c]);
+                    if (lane == 0) res[c][p * 32 + grp] = v;
+                }
+            };
+            switch (cn) {
+                case 1: go(std::integral_constant<int, 1>{}); break;
+                case 2: go(std::integral_constant<int, 2>{}); break;
+                case 3: go(std::integral_constant<int, 3>{}); break;
+                default: go(std::integral_constant<int, 4>{}); break;
+            }
+        }
+        __syncthreads();
+        const int w = int(threadIdx.x) >> 5, l32 = int(threadIdx.x) & 31;
+        if (w < cn) {   // mode 8's epilogue: SwiGLU + q8_1, one block of h an entry
+            const float gg = res[w][l32], uu = res[w][32 + l32];
+            const float xi = (gg / (1.0f + __expf(-gg))) * uu;
+            float amax = fabsf(xi), sum = xi;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+                sum += __shfl_xor_sync(0xffffffffu, sum, o);
+            }
+            const float d = q8_1_finite(amax / 127.0f);
+            const int8_t q = q8_1_quant(xi, d, amax);
+            block_q8_1* y = hq + (size_t) (c0 + w) * hb + blockIdx.x;
+            y->qs[l32] = q;
+            if (l32 == 0) y->ds = q8_1_ds(d, sum);
+        }
+    }
+}
+template<int TD, int LPR>
+__global__ void __launch_bounds__(256) g906_kq_down_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                           const int32_t* __restrict__ grp_start, const int32_t* __restrict__ n_groups,
+                                                           const int32_t* __restrict__ ent_dst, const block_q8_1* __restrict__ hq,
+                                                           NativeExpertLayout L, float* __restrict__ out) {
+    constexpr int GPB = 256 / LPR;
+    extern __shared__ int kq_sx[];
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int hb = (int) (L.n_ff / 32), bpr = (int) (L.n_ff / 256);
+    int* isum = kq_sx + KQ_NT * hb * 9;
+    const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+    const int e0 = grp_start[g], e1 = grp_start[g + 1];
+    const int lane = int(threadIdx.x) % LPR, grp = int(threadIdx.x) / LPR;
+    const int r = int(blockIdx.x) * GPB + grp;
+    const bool live = r < L.n_embd;
+    const uint8_t* row = blob + L.down_off + (size_t) (live ? r : 0) * L.d_row;
+    for (int c0 = e0; c0 < e1; c0 += KQ_NT) {
+        const int cn = min(KQ_NT, e1 - c0);
+        __syncthreads();
+        kq_stage_x(kq_sx, isum, cn, hb, [&](int c) { return hq + (size_t) (c0 + c) * hb; });
+        const block_q8_1* x = (const block_q8_1*) kq_sx;
+        auto go = [&](auto ncc) {
+            constexpr int NC = decltype(ncc)::value;
+            float tmp[NC] = {};
+            kq_row<TD, LPR, NC, (LPR >= 4 ? 2 : 4)>(row, bpr, lane, x, isum, hb, tmp);
+#pragma unroll
+            for (int c = 0; c < NC; ++c) {
+                const float v = kq_group_sum<LPR>(tmp[c]);
+                if (live && lane == 0) out[(size_t) ent_dst[c0 + c] * L.n_embd + r] = v;
+            }
+        };
+        switch (cn) {
+            case 1: go(std::integral_constant<int, 1>{}); break;
+            case 2: go(std::integral_constant<int, 2>{}); break;
+            case 3: go(std::integral_constant<int, 3>{}); break;
+            default: go(std::integral_constant<int, 4>{}); break;
+        }
+    }
+}
+bool g906_kq_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_G906_KQ"); return !(v && v[0] == '0'); }();
+    return on;
+}
+#endif
+
+#if defined(STRATA_HIP_GFX906)
 // ---- gfx906 dense rows in the grid formats (IQ3_S; Q2_0 from native_q2_0_mmvq): mode 9's decoders on a dense matrix.
 // A row a 32-lane group, 8 rows at a time a block; call k = lane + 32 it is (block k / 8, part k % 8) as in
 // g906_gu_kernel: every load of a row issued first, each call decoded once and applied to every column (activations
@@ -6986,6 +7221,37 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     float* h = (float*) ((uint8_t*) scratch + 2 * fa);
     block_q8_1* hq = (block_q8_1*) ((uint8_t*) scratch + 3 * fa);
     const auto* X = (const block_q8_1*) x_q8_1;
+#if defined(STRATA_HIP_GFX906)
+    // gfx906 K-quant experts (g906_kq_gu_kernel): gate/up + SwiGLU + q8_1 in one launch; the down rows on g906_kq_down_kernel for
+    // Q4_K / Q5_K, else the down path below (it reads the same hq)
+    const bool kq_gu = g906_kq_on() && g_exp_phase == 0 && !nib_layout(L) && L.tail_off == 0 && L.had_block == 0 &&
+                       (L.gu_type == 12 || L.gu_type == 13) && L.n_embd % 256 == 0 && L.n_ff % 32 == 0 &&
+                       (size_t) KQ_NT * (L.n_embd / 32) * 40 <= 48 * 1024;
+    if (kq_gu) {
+        const size_t sh = (size_t) KQ_NT * (size_t) (L.n_embd / 32) * 40;   // 36-byte blocks + their integer sums
+        const dim3 gg((unsigned) (L.n_ff / 32), (unsigned) cap_groups);
+        if (L.gu_type == 12) g906_kq_gu_kernel<12><<<gg, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+        else g906_kq_gu_kernel<13><<<gg, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq);
+        check("native_expert_grouped/kq gu");
+        if ((L.d_type == 12 || L.d_type == 13) && L.n_ff % 256 == 0) {
+            const size_t shd = (size_t) KQ_NT * (size_t) (L.n_ff / 32) * 40;
+            // lanes a row: 4 (2 tasks each at n_ff 512; 2 lanes x 4 tasks measured the same, 116.3 vs 116.2 tok/s), STRATA_G906_KQ_DLPR=2
+            static const int dl = [] { const char* v = std::getenv("STRATA_G906_KQ_DLPR"); return v && v[0] == '2' ? 2 : 4; }();
+            const dim3 gd((unsigned) ((L.n_embd + 256 / dl - 1) / (256 / dl)), (unsigned) cap_groups);
+            if (dl == 4) {
+                if (L.d_type == 12) g906_kq_down_kernel<12, 4><<<gd, 256, shd, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+                else g906_kq_down_kernel<13, 4><<<gd, 256, shd, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            } else {
+                if (L.d_type == 12) g906_kq_down_kernel<12, 2><<<gd, 256, shd, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+                else g906_kq_down_kernel<13, 2><<<gd, 256, shd, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            }
+            check("native_expert_grouped/kq down");
+            return;
+        }
+    }
+#else
+    constexpr bool kq_gu = false;
+#endif
 #if !STRATA_EXPERT_NIBBLE_BUILT
     if (L.gu_nib) {   // STRATA_EXPERT_NIBBLE's slots: the switch is refused at start in a build without the kernels
         std::fprintf(stderr, "native_expert_grouped: 4-bit gate/up slots are not built into this engine\n");
@@ -7109,13 +7375,13 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
 #endif
     // 147-verify STRATA_GU_SWIGLU=1: gate/up + SwiGLU + q8_1 in one launch where the CUDA layout's 16-lane kernel would run
-    bool gs_done = false;
+    bool gs_done = kq_gu;   // gfx906 K-quants: g906_kq_gu_kernel made hq above (its down type takes the down path below)
 #if STRATA_EXP_LAYOUTS
     const bool gs_layout = !fused_gu && em0 == 0;
 #else
     const bool gs_layout = true;
 #endif
-    if (gs_layout && !nib_layout(L) && g_exp_phase == 0 && !v1 && gu_swiglu_on() && !(expdec_mode() && !g_old_kernels && expdec_gu_ok(L))) {
+    if (!kq_gu && gs_layout && !nib_layout(L) && g_exp_phase == 0 && !v1 && gu_swiglu_on() && !(expdec_mode() && !g_old_kernels && expdec_gu_ok(L))) {
         switch (L.gu_type) {
 #define STRATA_GS(T) case T: gs_done = launch_gu_swiglu<T>(L, gy, s, grp_ptr, grp_start, n_groups, ent_tok, X, hq); break;
             STRATA_GU_FMTS(STRATA_GS)

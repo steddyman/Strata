@@ -25,6 +25,11 @@
 
 **Free, open source, and yours to run.** Use Strata on your desktop or with your favorite coding tools. No account needed.
 
+> **This fork** adds hand-tuned kernels and a desktop app (AppImage) for the **Mac Pro 2019 with a Radeon Pro Vega II Duo**
+> (two gfx906 dies, 64 GB HBM2) and 192 GB of RAM, running Linux: Qwen3.8-Flash-Next at ~74–83 tok/s, Qwen3.6-35B-A3B at
+> 102–196 tok/s and DeepSeek-V4.1-Flash at ~29 tok/s. It needs the GPU power level set to `auto`.
+> See [docs/MAC_PRO_2019_LINUX.md](docs/MAC_PRO_2019_LINUX.md).
+
 ## Models
 
 We recommend **ISTA-DASLab first**, then **Unsloth** and other providers, where a compatible model fits.
@@ -160,6 +165,7 @@ Follow the prompts to download and start a model. [Terminal guide](docs/TERMINAL
 | **Intel Arc · Linux** | [Intel setup](docs/INTEL_ARC.md) |
 | **Apple Silicon · M1 or newer** | [Mac setup](docs/MAC.md) |
 | **AMD Ryzen AI Max · Strix Halo** | [Strix Halo setup](docs/STRIX_HALO.md) |
+| **Mac Pro 2019 · Radeon Pro Vega II Duo (gfx906), Linux** · this fork | [Mac Pro 2019 setup](docs/MAC_PRO_2019_LINUX.md) |
 | **NVIDIA DGX Spark · Linux** | [DGX Spark setup](docs/DGX_SPARK_LINUX.md) |
 
 <a id="using-it"></a>

@@ -247,6 +247,62 @@ def install_package(dest: Path, package: str | os.PathLike, *, emit: Callable[[s
         shutil.rmtree(work, ignore_errors=True)
 
 
+#: Engine packages built with strata-dsv41 inside them that have no DeepSeek package of their own on the update feed: the gfx906 build
+#: (packaging/build_hip_linux.sh VARIANT=gfx906, shipped inside the gfx906 AppImage).  Only these variants are taken from the engine store.
+BUNDLED_VARIANTS = ("gfx906",)
+
+
+def _link_or_copy(src, dst, *, follow_symlinks=True):
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+    return dst
+
+
+def from_engine_store(dest: Path, components: Path | None = None, *, emit: Callable[[str], None] = print) -> Path | None:
+    """A strata-dsv41 inside an installed Strata engine package of a BUNDLED_VARIANTS build (components/engine/<folder>): that package is put in
+    `dest` (engine-dsv41/<same folder name>, hard links where the disk allows, else copies) and checked against its manifest, so the rest of
+    setup finds it like a downloaded DeepSeek package.  The newest such package; None when there is none (every other PC: nothing changes)."""
+    from strata_control import engine_component as ec
+    from strata_control.targets import host_platform
+    try:
+        store = Path(components or ec.components_dir()) / "engine"
+        folders = [d for d in store.iterdir() if d.is_dir() and not d.name.startswith(".") and (d / exe_name()).is_file()]
+    except OSError:
+        return None
+    found = []
+    for d in folders:
+        try:
+            comp = ec.read_manifest(d)
+        except (ec.ComponentProblem, OSError, ValueError):
+            continue
+        if comp.variant in BUNDLED_VARIANTS and comp.platform == host_platform() and any(f[0] == exe_name() for f in comp.files):
+            found.append((version_key(d.name), d))
+    if not found:
+        return None
+    src = max(found)[1]
+    dest = Path(dest)
+    target = dest / src.name
+    if (target / exe_name()).is_file():
+        return target / exe_name()
+    temp = dest / f".store-{src.name}.tmp"
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(temp, ignore_errors=True)
+        shutil.copytree(src, temp, copy_function=_link_or_copy)
+        ec.verify(ec.read_manifest(temp), full=True)
+        temp.rename(target)
+    except (ec.ComponentProblem, OSError, ValueError) as exc:
+        shutil.rmtree(temp, ignore_errors=True)
+        emit(f"The DeepSeek engine inside the installed engine {src.name} could not be used: {exc}")
+        return None
+    if os.name != "nt":
+        (target / exe_name()).chmod(0o755)
+    emit(f"DeepSeek engine taken from the installed engine package {src.name} (every file matches its manifest): {target}")
+    return target / exe_name()
+
+
 def install(dest: Path, source: str, *, hardware: dict | None = None, emit: Callable[[str], None] = print, cancel=None) -> Path | None:
     """Fetch the DeepSeek engine package for this PC from the signed feed at `source` (a URL or a folder) into `dest`.
     Returns the new strata-dsv41, or None with a plain line through `emit` when there is none (not in the feed, nothing for this PC)."""

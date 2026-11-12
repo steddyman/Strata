@@ -10,6 +10,7 @@ import { RunningModels } from '../components/RunningModels';
 import { LocalModelImport } from '../components/LocalModelImport';
 import { gpuId } from '../lib/monitor-hardware';
 import { GpuRoles } from '../components/GpuRoles';
+import { GpuClockNotice } from '../components/GpuClockNotice';
 import { normalize as normalizeRoles, order as roleOrder, recommend as recommendRoles, sameRoles, type RoleCard, type Roles } from '../lib/gpu-roles';
 import { RunImageModel } from '../components/RunImageModel';
 import { IMAGE_GENERATION_VISIBLE } from '../lib/features';
@@ -423,6 +424,7 @@ function LegacyModelRunScreen({ importFirst = false, initialVariant }: {
                 }}><span className="run-header-full">{tr("Reset to recommended")}</span><span className="run-header-short">{tr("Reset defaults")}</span></Btn></> : null)}<button className="st-btn st-btn--secondary" aria-pressed={expert} disabled={pending} onClick={() => setExpert(!expert)}><Icon name="sliders" size={16}/>{tr(expert ? <><span className="run-header-full">{tr("Close expert mode")}</span><span className="run-header-short">{tr("Easy mode")}</span></> : 'Expert mode')}</button></>}>
     <div className="model-run">
       <ActionError />
+      <GpuClockNotice gpus={hardware?.gpus}/>
       <div className="run-toolbar">
         {tr(expert ? <button className="run-basics-summary run-toolbar-summary" aria-expanded={basicsOpen} aria-controls="run-basic-settings" onClick={() => setBasicsOpen(!basicsOpen)}>{tr(modelSummary)}<Icon name="chevron" size={15}/></button> : <div className="run-basics-summary run-toolbar-summary run-model-summary">{tr(modelSummary)}</div>)}
         <button ref={profileTrigger} className="st-btn st-btn--secondary run-saved-settings" aria-label={tr("Saved settings{0}{1}", [selectedProfile ? `: ${selectedProfile.name}` : tr(''), profileChanged ? tr(' — unsaved changes') : tr('')])} aria-haspopup="menu" aria-expanded={profileMenu} disabled={pending} onClick={() => setProfileMenu(!profileMenu)}><Icon name="layers" size={17}/><span>{tr(selectedProfile?.name ?? 'Saved settings')}</span>{tr(profileChanged ? <i title={tr("Unsaved changes")}/> : null)}<Icon name="chevron" size={14}/></button>

@@ -128,6 +128,64 @@ the new kernels off. Gate/up for Q4_K experts uses the V2K kernels (`STRATA_EXPE
 
 More numbers are in [History](#history--older-measurements).
 
+### gfx906 (Vega 20: Radeon Pro VII, MI50, Vega II)
+
+The gfx906 build (`STRATA_HIP_GFX906`, the CUDA sources compiled as HIP for wave64) runs this family too. On top of
+the shared engine it has its own decode kernels, the lessons of the Qwen3.8 gfx906 work: a lane group per row, every
+load of a lane issued before its first use, activations in LDS, and a verify window's tokens inside the kernel.
+Measured on a Mac Pro 2019's Radeon Pro Vega II Duo with the GPU power level on `auto`
+([MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md)).
+
+- The packed Q8_0 dense rows: `g906_q8p_kernel` (`STRATA_G906_Q8P=0` turns it off).
+- The FP32 router and GDN alpha / beta rows, the residual norm and the MoE combine: `src/qwen35/q36_g906.cuh`.
+- The attention scores: `k_attn_part_g906`, 16 lanes a cell.
+- The Q4_K / Q5_K experts: gate/up, SwiGLU and q8_1 in one launch (`g906_kq_gu_kernel`) and the down rows
+  (`g906_kq_down_kernel`). `STRATA_G906_KQ=0` turns them off.
+
+`STRATA_Q36_G906=0` switches off the kernels in `q36_g906.cuh` and the attention kernel. These kernels sum in another
+order than the shared ones, so outputs match them to float rounding, not bit for bit. Each token of a verify window is
+computed as a single token is, so the MTP drafts still give exactly the plain greedy text.
+
+> **Measured on:** one die of a Radeon Pro Vega II Duo (32 GB HBM2, gfx906), Xeon W-3245, UD-Q4_K_XL, the 10 parity
+> prompts, greedy, 128K context. Before = the same engine with the shared kernels only.
+
+| | Before | gfx906 kernels |
+| --- | ---: | ---: |
+| Decode, no drafts (`--mtp 0`) | 84 tok/s | 114 |
+| Decode, MTP drafts (`--mtp 2`, the default) | 97 to 161 | 128 to 196 |
+| Prompt pp4096 / pp16384 | - | 1,345 / 1,090 |
+| Mean KL against llama.cpp CPU (64 teacher-forced steps a prompt) | 4.1e-3 | 3.3e-3 |
+| Plain greedy text with MTP drafts | 10 of 10 the same | 10 of 10 the same |
+
+UD-Q4_K_XL fits a 32 GB die with every expert in VRAM. UD-Q6_K_XL and Q8_0 do not fit one die. On two dies (a Vega II
+Duo, two MI50s) they run as a layer split, below.
+
+### Two GPUs (layer split)
+
+With two cards set to Main and Helper (the app's graphics-card choice, or `strata launch --gpu-roles`), the server
+starts the engine with both cards visible and `--layer-split auto`. The first layers run on the Helper card. The rest,
+the MTP block and the head run on the Main card. `auto` picks the boundary that leaves both cards about the same free
+memory; `--layer-split N` (the `"layer_split"` setting) makes layer N the Main card's first.
+
+Each card keeps its own working buffers. At the boundary the Main card copies three small rows from the Helper card
+(the residual, the normed input and its 8-bit image, about 10 KB a token) over the peer link. Every expert must fit in
+VRAM: a split has no CPU expert mode. Setup writes a split for Qwen3.6 on gfx906 cards (elsewhere
+`STRATA_Q36_SPLIT=1`). A split gives the same bits as one card for the same file.
+
+> **Measured on:** a Radeon Pro Vega II Duo (two gfx906 dies, 32 GB each, XGMI link), the 10 parity prompts, greedy,
+> 128K context.
+
+| | UD-Q4_K_XL, one die | UD-Q4_K_XL, split | Q8_0, split |
+| --- | ---: | ---: | ---: |
+| Decode, no drafts | 114 tok/s | 106 | 102 |
+| Decode, MTP drafts | 128 to 196 | 115 to 188 | 107 to 160 |
+| Prompt pp4096 | 1,345 | 1,318 | 1,182 |
+| Mean KL against llama.cpp CPU | 3.3e-3 | the same bits as one die | 3.8e-3 |
+| Plain greedy text with MTP drafts | 10 of 10 | 10 of 10 | 10 of 10 |
+
+Three requests at once on the split (`--batch 3`) give the same text as each alone, and a 3,000-token prompt admitted
+while two others decode does too.
+
 ## Limits
 
 - Eight slots at most (the window holds 8 rows). `--batch-mtp` shares those rows between slots and proposals.

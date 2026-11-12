@@ -493,10 +493,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings ${_strata_gpu_runtime_target})
   # the engine path for the same family (serve protocol, prompt chunks, decode graph): src/qwen35/q36_engine.cu, a
   # library that `strata` switches to for a qwen35moe model (the family switch at the top of its main) and that
-  # strata-q36 wraps on its own.  Not on gfx906 (#3172, #3271): it calls cuBLAS entry points the wave64 compat layer does
-  # not map (cublasSgemm, cublasGemmStridedBatchedEx) and its kernels assume 32-lane warps; main() guards every use with
-  # STRATA_HAVE_QWEN35, so a gfx906 build links and runs the Qwen3.8 family, and `strata --families` says so
-  if(NOT STRATA_HIP_GFX906)
+  # strata-q36 wraps on its own.  On gfx906 the wave64 compat layer maps its cuBLAS entry points (cublasSgemm,
+  # cublasGemmStridedBatchedEx) and keeps its 32-lane shuffles in 32-lane halves; STRATA_GFX906_NO_Q36=ON leaves it out.
+  option(STRATA_GFX906_NO_Q36 "Leave the Qwen3.6 engine out of a gfx906 build" OFF)
+  if(NOT (STRATA_HIP_GFX906 AND STRATA_GFX906_NO_Q36))
   add_library(strata_qwen35 STATIC src/qwen35/q36_engine.cu)
   target_include_directories(strata_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_kernels strata_warnings ${_strata_gpu_runtime_target})
@@ -516,10 +516,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # Its own executable for now (strata-dsv41); a family switch in `strata` comes after first light.  OFF by default: it
   # changes no existing target (the vendored kernels live in strata::dsv41k, so no symbol is shared with strata_kernels).
   option(STRATA_BUILD_DSV41 "Build the DeepSeek-V4.1 engine path (strata-dsv41)" OFF)
-  if(STRATA_BUILD_DSV41 AND NOT STRATA_HIP_GFX906)
+  # gfx906 (Vega 20, wave64, the CUDA-as-HIP compat toolchain): the dsv41 sources take their HIP branches (STRATA_USE_HIP,
+  # hip_extra.h) as on the wave32 HIP build; the gfx11 / gfx12 WMMA kernels stay behind their arch guards.
+  if(STRATA_BUILD_DSV41)
     add_library(strata_dsv41_kernels STATIC src/dsv41/vendor/exl3.cu src/dsv41/vendor/sampler.cu src/dsv41/vendor/moe_win.cu
                 src/dsv41/vendor/exl3_cpu.cpp)
-    if(NOT STRATA_ENABLE_HIP)   # (the pre-sm_80 NVIDIA decode kernels exl3.cu dispatches to)
+    if(NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906)   # (the pre-sm_80 NVIDIA decode kernels exl3.cu dispatches to)
       target_sources(strata_dsv41_kernels PRIVATE src/dsv41/vendor/exl3_legacy.cu)
     endif()
     target_include_directories(strata_dsv41_kernels PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
@@ -601,7 +603,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     if(STRATA_NATIVE_EXPERTS)
       # the trellis experts (device kernels ds4_tq.cu, CPU lane ds4_tq_cpu.cpp) against a double reference; needs a GPU, no model
       # both test .cpp files launch kernels, so they compile as HIP on the AMD backend and as CUDA on the NVIDIA one
-      if(STRATA_ENABLE_HIP)
+      if(STRATA_ENABLE_HIP OR STRATA_HIP_GFX906)
         set(_ds4_test_lang HIP)
       elseif(STRATA_ENABLE_CUDA)
         set(_ds4_test_lang CUDA)
@@ -685,6 +687,15 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     if(STRATA_ENABLE_HIP)
       foreach(_t strata_dsv41_kernels strata-dsv41)
         target_compile_options(${_t} PRIVATE "$<$<COMPILE_LANGUAGE:HIP,CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/include/strata/dsv41/hip_extra.h>")
+      endforeach()
+    endif()
+    if(STRATA_HIP_GFX906)
+      foreach(_t strata_dsv41_kernels strata-dsv41 ds4_tq_test ds4_tq_test_portable ds4_iq_test ds4_dq_test)
+        if(NOT TARGET ${_t})
+          continue()
+        endif()
+        target_compile_definitions(${_t} PRIVATE STRATA_USE_HIP=1)
+        target_compile_options(${_t} PRIVATE "$<$<COMPILE_LANGUAGE:HIP,CUDA,CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/include/strata/dsv41/hip_extra.h>")
       endforeach()
     endif()
   endif()

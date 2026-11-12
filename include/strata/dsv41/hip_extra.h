@@ -45,6 +45,12 @@
 #ifndef CUBLAS_GEMM_DEFAULT_TENSOR_OP
 #define CUBLAS_GEMM_DEFAULT_TENSOR_OP HIPBLAS_GEMM_DEFAULT
 #endif
+#ifndef cudaDevAttrIntegrated
+#define cudaDevAttrIntegrated hipDeviceAttributeIntegrated
+#endif
+#ifndef cublasSgemm
+#define cublasSgemm hipblasSgemm
+#endif
 #ifndef cudaDataType
 #define cudaDataType hipDataType
 #endif

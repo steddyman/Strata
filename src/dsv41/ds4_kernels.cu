@@ -385,6 +385,59 @@ __global__ void __launch_bounds__(kThreads) hc_mix_split_kernel(const float* __r
     if (threadIdx.x == 0) cnt[t] = 0u;
 }
 
+#if defined(STRATA_HIP_GFX906)
+// gfx906: hc_mix_split_kernel's 24 blocks (a mix a block, each reading its 80 KB row and the token's 80 KB) leave most of 60 CUs idle
+// (18.5 us).  Here a mix is kHcS slices of the row, a block each (192 blocks a token); a slice's dot and the token's sum of squares
+// over the slice go to the scratch after the counters (cnt + kWin: the caller allocates kWin (1 + 33 kHcS) words there), and the
+// block that finishes the token sums the slices in a fixed order, then runs the split on warp 0 as hc_mix_split_kernel does.  The same
+// products, another order of the float additions (rounding-level).  DS4_G906_HCMIX=0: the kernel above.
+constexpr int kHcS = 8;
+__global__ void __launch_bounds__(kThreads) hc_mix_split_g906_kernel(const float* __restrict__ h, const float* __restrict__ fn,
+                                                                     int hcdim, float eps, float* mixes, unsigned* cnt,
+                                                                     const float* __restrict__ scale,
+                                                                     const float* __restrict__ base, int hc, int iters,
+                                                                     float hc_eps, float* pre, float* post, float* comb) {
+    const int n_mix = gridDim.x / kHcS, m = blockIdx.x / kHcS, sl = blockIdx.x % kHcS, t = blockIdx.y;
+    float* part = (float*) (cnt + kWin) + (size_t) t * (33 * kHcS);   // [32 mixes][kHcS] dots, then [kHcS] sums of squares
+    const int len = hcdim / kHcS, k0 = sl * len;
+    const float* w = fn + (size_t) m * hcdim + k0;
+    const float* x = h + (size_t) t * hcdim + k0;
+    float acc = 0.0f, ss = 0.0f;
+    for (int k = threadIdx.x * 4; k < len; k += kThreads * 4) {
+        const float4 hv = *(const float4*) (x + k);
+        const float4 wv = *(const float4*) (w + k);
+        acc += hv.x * wv.x + hv.y * wv.y + hv.z * wv.z + hv.w * wv.w;
+        ss += hv.x * hv.x + hv.y * hv.y + hv.z * hv.z + hv.w * hv.w;
+    }
+    acc = block_sum(acc);
+    ss = block_sum(ss);
+    __shared__ unsigned last;
+    __shared__ float smx[32];
+    if (threadIdx.x == 0) {
+        part[m * kHcS + sl] = acc;
+        if (m == 0) part[32 * kHcS + sl] = ss;
+        __threadfence();
+        last = atomicAdd(cnt + t, 1u) == gridDim.x - 1 ? 1u : 0u;
+    }
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    if (threadIdx.x < 32) {
+        const volatile float* vp = part;
+        float a = 0.0f, q = 0.0f;
+        for (int j = 0; j < kHcS; ++j) q += vp[32 * kHcS + j];
+        if ((int) threadIdx.x < n_mix)
+            for (int j = 0; j < kHcS; ++j) a += vp[threadIdx.x * kHcS + j];
+        const float mx = a * rsqrtf(q / (float) hcdim + eps);
+        if ((int) threadIdx.x < n_mix) mixes[(size_t) t * 32 + threadIdx.x] = mx;
+        smx[threadIdx.x] = (int) threadIdx.x < n_mix ? mx : 0.0f;
+        __syncwarp();
+        hc_split_body(smx, t, threadIdx.x, scale, base, hc, iters, hc_eps, pre, post, comb);
+    }
+    if (threadIdx.x == 0) cnt[t] = 0u;
+}
+#endif
+
 __global__ void __launch_bounds__(1024) hc_pre_norm_kernel(const float* __restrict__ h, const float* __restrict__ mix,
                                                            const float* __restrict__ w, int dim, int hc, float eps,
                                                            float* __restrict__ x) {
@@ -503,6 +556,35 @@ __global__ void __launch_bounds__(kThreads) gemv_f32_kernel(const float* __restr
     acc = warp_sum(acc);
     if (lane == 0) y[(size_t) t * ldy + row] = acc;
 }
+
+#if defined(STRATA_HIP_GFX906)
+// gfx906: the router's 384 rows, a warp each, are 48 blocks - under a wave a SIMD on 60 CUs, so the 7.9 MB of F32 weights came in at
+// ~315 GB/s (25 us).  Here a row is a block of 256 threads (each 5 float4 of a 5120-wide row), summed in LDS in a fixed order: the
+// same products, another order of the float additions (rounding-level; the prompt and token paths share it).  DS4_G906_GEMVF32=0 off.
+__global__ void __launch_bounds__(256) gemv_f32_row_kernel(const float* __restrict__ W, const float* __restrict__ x, int k,
+                                                           float* __restrict__ y, int ldy) {
+    __shared__ float part[256];
+    const int row = blockIdx.x, t = blockIdx.y;
+    const float4* w = (const float4*) (W + (size_t) row * k);
+    const float4* xv = (const float4*) (x + (size_t) t * k);
+    float acc = 0.0f;
+    for (int c = threadIdx.x; c < k / 4; c += 256) {
+        const float4 a = w[c], b = xv[c];
+        acc = fmaf(a.x, b.x, acc);
+        acc = fmaf(a.y, b.y, acc);
+        acc = fmaf(a.z, b.z, acc);
+        acc = fmaf(a.w, b.w, acc);
+    }
+    part[threadIdx.x] = acc;
+    __syncthreads();
+#pragma unroll
+    for (int o = 128; o > 0; o >>= 1) {
+        if ((int) threadIdx.x < o) part[threadIdx.x] += part[threadIdx.x + o];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) y[(size_t) t * ldy + row] = part[0];
+}
+#endif
 
 // ---------------------------------------------------------------- the router
 // A pick that never came out: every score left is NaN (the gate's input went non-finite), so nothing beat -FLT_MAX and the
@@ -2277,6 +2359,14 @@ void hc_mix(const float* h, const float* fn, int hcdim, int n_mix, int T, float 
 void hc_mix_split(const float* h, const float* fn, int hcdim, int n_mix, int T, float eps, float* mixes, unsigned* cnt,
                   const float* scale, const float* base, int hc, int iters, float hc_eps, float* pre, float* post,
                   float* comb, cudaStream_t s) {
+#if defined(STRATA_HIP_GFX906)
+    static const bool g906 = [] { const char* e = std::getenv("DS4_G906_HCMIX"); return !(e && e[0] == '0'); }();
+    if (g906 && n_mix <= 32 && T <= kWin && hcdim % (kHcS * 4) == 0) {
+        strata_ds4_launch(hc_mix_split_g906_kernel, dim3(n_mix * kHcS, T), kThreads, 0, s, h, fn, hcdim, eps, mixes, cnt, scale, base, hc,
+                          iters, hc_eps, pre, post, comb);
+        return;
+    }
+#endif
     strata_ds4_launch(hc_mix_split_kernel, dim3(n_mix, T), kThreads, 0, s, h, fn, hcdim, eps, mixes, cnt, scale, base, hc, iters, hc_eps, pre,
                                                             post, comb);
 }
@@ -2370,6 +2460,13 @@ void gemv_f16_rows(const uint16_t* W, const float* x, size_t ldx, int n, int k, 
 void gemv_f32(const float* W, const float* x, int n, int k, int T, float* y, int ldy, cudaStream_t s) {
 #if defined(STRATA_METAL)
     if (T > 0 && ::strata::dsv41::metal_host::gemv_f32(W, x, n, k, T, y, ldy)) return;
+#endif
+#if defined(STRATA_HIP_GFX906)
+    static const bool g906 = [] { const char* e = std::getenv("DS4_G906_GEMVF32"); return !(e && e[0] == '0'); }();
+    if (g906 && T > 0 && k % 4 == 0) {
+        strata_ds4_launch(gemv_f32_row_kernel, dim3((unsigned) n, (unsigned) T), 256, 0, s, W, x, k, y, ldy);
+        return;
+    }
 #endif
     if (T > 0) strata_ds4_launch(gemv_f32_kernel, dim3(cdiv(n, kThreads / 32), T), kThreads, 0, s, W, x, n, k, y, ldy);
 }

@@ -215,7 +215,12 @@ __global__ void __launch_bounds__(256) k_add_rms_q(float* x, const float* y, con
     for (int i = threadIdx.x; i < n; i += 256) {
         const float hv = __fmul_rn(__fmul_rn(xr[i], r), w[i]);   // no FMA with the quantizer's sums: the old h was stored first
         hr[i] = hv;
+#if defined(STRATA_HIP_GFX906)
+        // gfx906: the register (the same bits as the store; the volatile read back is an L2 round trip per element there)
+        q8_store(qr, i, hv, threadIdx.x & 31);
+#else
         q8_store(qr, i, ((volatile float*) hr)[i], threadIdx.x & 31);   // the stored value, as the standalone quantizer reads it
+#endif
     }
 }
 
@@ -259,7 +264,11 @@ __global__ void __launch_bounds__(1024) k_moe_out_small(float* x, const float* p
     for (int i = threadIdx.x; i < n; i += 1024) {
         const float hv = __fmul_rn(__fmul_rn(vv[i], r), wn[i]);
         h[(size_t) t * n + i] = hv;
+#if defined(STRATA_HIP_GFX906)
+        if (hq) q8_store(hq + (size_t) t * (n >> 5), i, hv, threadIdx.x & 31);   // (the register: see k_add_rms_q)
+#else
         if (hq) q8_store(hq + (size_t) t * (n >> 5), i, ((volatile float*) h)[(size_t) t * n + i], threadIdx.x & 31);
+#endif
     }
 }
 

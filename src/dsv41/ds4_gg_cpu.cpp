@@ -10,6 +10,7 @@
 #include <string>
 
 #if defined(STRATA_DSV41_TQ_CPU)
+#include "strata/kernels/cpu/iq_avx512_clx.hpp"
 #include "ggml-cpu.h"
 #include "ggml.h"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -96,9 +97,9 @@ void gg_cpu_set_iq256(int mode) { g_iq256 = mode; }
 // microcode - 1.8 GB/s against these rows' 33 GB/s on an EPYC 7452 (a 2.00 set decodes 3x slower on one card), 19-31 GB/s on Intel.
 // The rows are bit-identical, so taking them at every token count only changes the speed.
 static int min_tokens(int type) { return type == 21 ? 1 : type == 29 ? 1 : 2; }
-static bool own_ok(int type, int impl) {
-    static std::once_flag once[2][32];
-    static bool ok[2][32];
+static bool own_ok(int type, int impl) {   // impl 0: the AVX2 rows, 1: the AVX-512 rows, 2: their Cascade Lake build
+    static std::once_flag once[3][32];
+    static bool ok[3][32];
     const int k = type & 31;
     std::call_once(once[impl][k], [&] {
         ok[impl][k] = false;
@@ -136,6 +137,7 @@ static bool own_ok(int type, int impl) {
                 for (int r = 0; r < rows; ++r) tc->vec_dot(n, &o0[(size_t) t][(size_t) r], 0, w.data() + (size_t) r * rb, 0, ap[(size_t) t], 0, 1);
             }
             if (impl == 1) strata::kernels::cpu::iq512x_rows(type, w.data(), rb, n, ap.data(), nt, p1.data(), 0, rows);
+            else if (impl == 2) strata::kernels::cpu::iq512x_rows_clx(type, w.data(), rb, n, ap.data(), nt, p1.data(), 0, rows);
             else strata::kernels::cpu::iq256x_rows(type, w.data(), rb, n, ap.data(), nt, p1.data(), 0, rows);
             for (int t = 0; t < nt; ++t)
                 if (std::memcmp(o0[(size_t) t].data(), o1[(size_t) t].data(), rows * sizeof(float)) != 0) {
@@ -199,7 +201,13 @@ static bool want_512(int type, int nt) {
     if (type == 29) return nt >= 2 || fam >= 0x1A;
     return false;
 }
-// 0: ggml-cpu's dot, 1: the AVX2 rows, 2: the AVX-512 rows
+// DS4_GG_IQ512_CLX: the AVX-512 rows' Cascade Lake build (iq_avx512_clx.cpp: no VBMI / VPOPCNTDQ needed) on a CPU without the full
+// AVX-512 rows - 1 / unset: taken (bit-identical, own_ok), 0: never.  Measured on a Xeon W-3245 (Mac Pro 2019, 16 cores): see the commit.
+static bool want_512_clx(int type) {
+    static const int mode = [] { const char* v = std::getenv("DS4_GG_IQ512_CLX"); return v == nullptr ? 1 : std::atoi(v) != 0 ? 1 : 0; }();
+    return mode != 0 && !strata::kernels::cpu::cpu_avx512_ok() && strata::kernels::cpu::iq512x_supported_clx(type);
+}
+// 0: ggml-cpu's dot, 1: the AVX2 rows, 2: the AVX-512 rows, 3: their Cascade Lake build
 static int use_iq256(int type, int nt) {
     if (g_iq256 < 0) {
         const char* v = std::getenv("DS4_GG_IQ256");
@@ -209,6 +217,7 @@ static int use_iq256(int type, int nt) {
     }
     if (g_iq256 == 0) return 0;
     if (want_512(type, nt) && own_ok(type, 1)) return 2;
+    if (want_512_clx(type) && own_ok(type, 2)) return 3;
     if (!strata::kernels::cpu::iq256x_supported(type)) return 0;
     if (g_iq256 == 2 && nt < min_tokens(type)) return 0;
     return own_ok(type, 0) ? 1 : 0;
@@ -219,6 +228,10 @@ static void dots(int type, const uint8_t* w, size_t rb, int n, const void* const
         const int impl = use_iq256(type, nt);
         if (impl == 2) {
             strata::kernels::cpu::iq512x_rows(type, w, rb, n, act, nt, out, r0, r1);
+            return;
+        }
+        if (impl == 3) {
+            strata::kernels::cpu::iq512x_rows_clx(type, w, rb, n, act, nt, out, r0, r1);
             return;
         }
         if (impl == 1) {

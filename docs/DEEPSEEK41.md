@@ -240,6 +240,28 @@ python setup.py --family deepseek41 --model ISTA-DAS-2.00bpw
 `strata-dsv41 --version` prints the commit it was built from. A build you made yourself is not signed by Strata, which is fine for your own computer.
 Please tell us how it runs on your card (the speed, and the card and RAM): we only list a card as tested after someone has run it.
 
+## gfx906 (Mac Pro 2019, Radeon Pro Vega II Duo)
+
+The gfx906 engine package (`VARIANT=gfx906 packaging/build_hip_linux.sh`, this fork) carries `strata-dsv41` built through the
+wave64 compat toolchain. There is no gfx906 package in the update feed: when you pick DeepSeek, setup copies the engine from
+the installed gfx906 engine package and checks every file against its manifest.
+
+What is different on gfx906:
+
+- **Two dies, tensor parallel.** Each expert's 2304-wide hidden layer is split unevenly at 256-value block boundaries
+  (1280 + 1024, the larger half alternating between dies by layer), so both dies compute every layer. Two-die logits are
+  within the model's own noise of one die (KL 0.048, against 0.052 from moving experts between GPU and CPU on one die).
+- **gfx906 kernels:** a lane-group Q5_K GEMV (13.3 → 7.0 ms a token), IQ1_M / IQ2 expert decoders by `v_perm_b32` and
+  `v_mul_u32_u24` (bitwise), 3 waves a SIMD for the token gate/up kernels, a router GEMV a block a row (25 → 14 µs) and
+  `hc_mix_split` in 8 slices (18.5 → 14.6 µs).
+- **CPU lane on Cascade Lake:** the AVX-512 i-quant rows without VBMI / VPOPCNTDQ (Xeon W-3245), checked bit for bit
+  against ggml before use: 12.0 → 10.5 ms a token.
+
+Measured on a Mac Pro 2019 (2x 32 GB Vega 20, Xeon W-3245, 192 GB DDR4-2933, GPU power level `auto`), ISTA-DAS 2.00 bpw
+general set: **~29 tok/s** at 8K context with drafting off, ~20 tok/s at 128K in the app. DSpark is slower here (13–21
+tok/s: each drafted token roughly triples the CPU lane's expert work), so set Drafting to **Off**. More, including the clock
+setting: [MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md).
+
 ## Compressed experts (trellis), for testing
 
 `strata-dsv41` reads the routed experts in the trellis types as well as the source MXFP4: TQK6 and TQK7 (agentionai's files), and the

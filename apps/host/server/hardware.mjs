@@ -183,7 +183,7 @@ async function detectGpus(platform, totalGb) {
     const drm=await detectDrmGpus();
     for(const gpu of drm) {
       const existing=gpus.find(g=>g.busId?.replace(/^00000000:/,'0000:')===gpu.busId);
-      if(existing)existing.sensorPath=gpu.sensorPath;else gpus.push(gpu);
+      if(existing){existing.sensorPath=gpu.sensorPath;if(gpu.clockLevel)existing.clockLevel=gpu.clockLevel;}else gpus.push(gpu);
     }
   }
   if(platform==='win32') {

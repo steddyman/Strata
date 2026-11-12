@@ -37,7 +37,7 @@ runs are not supported. Use the [package table](#ready-made-packages) to match y
 | RX 6800 / 6900 series, RX 6700 XT | gfx1030, gfx1031 | Has a package, not tested on a real card ([RDNA2](#rdna2-gfx1030)) |
 | Ryzen AI Max (Strix Halo) | gfx1151 | [STRIX_HALO.md](STRIX_HALO.md) |
 | Radeon 780M / 760M | gfx1103 | Linux, opt-in build: [RADEON_780M.md](RADEON_780M.md) |
-| Instinct MI50 / MI60, Radeon VII | gfx906 | Source build, community-tested ([gfx906](#gfx906-instinct-mi50--mi60-radeon-vii-wave64-built-from-source)) |
+| Instinct MI50 / MI60, Radeon VII, Radeon Pro Vega II / Vega II Duo | gfx906 | Source build, community-tested ([gfx906](#gfx906-instinct-mi50--mi60-radeon-vii-wave64-built-from-source); Mac Pro 2019 on Linux: [MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md)) |
 
 Strix Point (890M / 880M, gfx1150) and Krackan (860M / 840M, gfx1152) are named and not supported by setup. RDNA1
 (gfx1012) builds by hand: [OLDER_GPUS.md](OLDER_GPUS.md#amd-building-gfx906-and-gfx1012).
@@ -554,10 +554,19 @@ compiles the CUDA sources as HIP through a small compat layer (`include/strata/p
 to a logical half of the 64-lane wavefront. Setup does not build it: build by hand and run `serve/server.py` with a config as
 on any other card.
 
+> **Mac Pro 2019 with a Radeon Pro Vega II Duo:** a ready-made AppImage build, gfx906 kernels for Qwen3.8-Flash-Next,
+> Qwen3.6-35B-A3B and DeepSeek-V4.1-Flash, the GPU clock setting it needs, and measured speeds:
+> [MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md). On any gfx906 card, check that the amdgpu power level is `auto`, not `low`
+> (`cat /sys/class/drm/card*/device/power_dpm_force_performance_level`): `low` costs about 30 % of decode speed, and the
+> app's Model page warns when it sees it.
+
 The gfx906 build is community-tested: the maintainers have no gfx906 card, and the engine here is checked to compile for
 gfx906 and nothing more. The attention switches `STRATA_GFX906_ATTN_QUERY_SWIZZLE=1` and `STRATA_GFX906_ATTN_REDUCE12=1` are
-off by default and compiled only into this build. A wave32 card seen by this build is refused at start. The Qwen3.6 family
-is not part of this build; `strata --families` lists what the binary runs. Please report how it runs on your card.
+off by default and compiled only into this build. A wave32 card seen by this build is refused at start. The build also runs the Qwen3.6 family
+([QWEN36.md](QWEN36.md#gfx906-vega-20-radeon-pro-vii-mi50-vega-ii); `STRATA_GFX906_NO_Q36=ON` leaves it out), and
+`VARIANT=gfx906` engine packages carry the DeepSeek-V4.1 engine `strata-dsv41` beside it
+([DEEPSEEK41.md](DEEPSEEK41.md#gfx906-mac-pro-2019-radeon-pro-vega-ii-duo)); `strata --families` lists what the binary runs.
+Please report how it runs on your card.
 
 **ROCm.** AMD's current ROCm releases no longer ship gfx906 libraries. The build used HIP 7.14 from the community image
 [`mixa3607/rocm-gfx906:7.14-complete`](https://hub.docker.com/r/mixa3607/rocm-gfx906) (rocBLAS/hipBLAS with gfx906 kernels)

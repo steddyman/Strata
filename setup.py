@@ -8679,6 +8679,15 @@ def own_path_parallel_note(a_parallel, fam: dict, model: str, vram_gb: float, ct
     return lines
 
 
+def own_path_split_ok(gpu: dict) -> bool:
+    """Whether the own-path engine (Qwen3.6) splits its layers across the chosen cards: the gfx906 engine (two Vega 20 dies,
+    measured there: docs/QWEN36.md), or STRATA_Q36_SPLIT=1 on other cards."""
+    if os.environ.get("STRATA_Q36_SPLIT") == "1":
+        return True
+    archs = gpu.get("archs") or [gpu.get("arch")]
+    return bool(archs) and all(str(x) == "gfx906" for x in archs)
+
+
 def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted):
     """Steps 2-7 for a family with its own engine path (OWN_PATH_FAMILIES: Qwen3.6-35B-A3B): the size, the context, the
     engine, the GGUF (pinned revision, size and SHA-256), the tokenizer from the GGUF, the config and the start
@@ -8690,8 +8699,11 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     ok(f"model: {fam['title']}")
     if fam.get("license"):
         say(f"  Its license: {fam['license']}")
-    if multi:
+    split = bool(multi) and own_path_split_ok(gpu)
+    if multi and not split:
         warn(f"{fam['title']} runs on one GPU so far: using GPU {gpu.get('index', 0)} ({gpu_name(gpu)}) only")
+    elif split:
+        ok(f"GPUs {multi} together: the engine splits {fam['title']}'s layers across them (the main card holds the head)")
     names = list(fam["models"])
     if a.model and a.model not in names:
         fail(f"{fam['title']} has no {a.model} model file", "choose one of: " + ", ".join(names))
@@ -8829,6 +8841,14 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     if gpu.get("count", 1) > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]
         cfg["gpus_asked"] = True
+    if split:                                          # the layer split (the server adds --layer-split): as setup_config writes it
+        cfg["gpu"] = multi
+        cfg["layer_split"] = getattr(a, "layer_split", None) or "auto"
+        if getattr(a, "_roles", None):
+            main = multi[-1]
+            cfg["gpu_order"] = "as_given"
+            cfg["gpu_roles"] = {str(i): ("main" if i == main else "helper" if i in multi else "off")
+                                for i in sorted(set(a._roles) | set(multi))}
     if a.host:
         cfg["host"] = a.host
     if a.api_key:
@@ -9562,6 +9582,11 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
     step(4, "the DeepSeek engine")
     eng, meta, lib_dirs = ROOT / "engine", {"version": None}, []
     exe = dsv41_exe(eng)
+    if exe is None and hip and not getattr(a, "dsv41_package", None):
+        # a gfx906 engine package carries strata-dsv41 inside it and the feed has none of its own: taken from the installed engine (no download)
+        from strata_control import dsv41_engine
+        if dsv41_engine.from_engine_store(dsv41_engine_dir(eng), emit=lambda m: say("  " + m)) is not None:
+            exe = dsv41_exe(eng)
     if (exe is None and not getattr(a, "dsv41_package", None) and not dsv41_engine_pending(eng) and not local_feed(getattr(a, "feed", None))
         and not github_reachable()):
         fail("Strata can't reach GitHub to download the DeepSeek engine.",
