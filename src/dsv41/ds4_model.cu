@@ -747,6 +747,11 @@ struct Chunk {
     uint8_t* ring = nullptr;
     size_t ring_stride = 0;
     int ring_n = 0;
+    // a tensor-parallel member's down part (its blocks of every row) staged whole: the matrix copied in one DMA, then
+    // cut on the GPU - a 2D host-to-device copy of g.dim short rows ran at 0.05 GB/s on gfx906 (13 GB/s whole);
+    // nullptr: the 2D copy straight from the host (DS4_DOWN_BOUNCE=0)
+    uint8_t* down_bounce = nullptr;
+    size_t down_bounce_bytes = 0;
     cudaStream_t cs = nullptr;
     cudaEvent_t filled[kParts] = {}, freed[kParts] = {};
     // in place (file_experts): each streamed expert's file region read into pinned staging (ring_n slots of
@@ -4206,6 +4211,18 @@ struct Model::Impl {
                     c.ring_n = std::max(Chunk::kParts, (int) ((mb << 20) / stride) / Chunk::kParts * Chunk::kParts);
                 }
                 if (!dalloc(d, c.ring, (size_t) c.ring_n * stride, err)) return false;
+                if (down_bounce_on()) {   // (the largest down matrix a member of this device streams, whole)
+                    size_t db = 0;
+                    for (const Layer& l : L)
+                        if (l.nm > 1 && !l.mtp)
+                            for (int m = 0; m < l.nm; ++m)
+                                if (member(l, m).dev == (int) di)
+                                    db = std::max(db, gg::type_row_bytes(gg::expert_type(l.lay, 2), g.ff) * (size_t) g.dim);
+                    if (db > 0) {
+                        if (!dalloc(d, c.down_bounce, db, err)) return false;
+                        c.down_bounce_bytes = db;
+                    }
+                }
             }
             CK(cudaStreamCreateWithFlags(&c.cs, cudaStreamNonBlocking));
             for (int i = 0; i < Chunk::kParts; ++i) {
@@ -4370,11 +4387,34 @@ struct Model::Impl {
         return true;
     }
 
+    // the down part's staging (Chunk::down_bounce): on in gfx906 builds, where the 2D copy
+    // crawls (DS4_DOWN_BOUNCE=0 off there, =1 on in other builds)
+    static bool down_bounce_on() {
+        static const bool on = [] {
+            const char* v = std::getenv("DS4_DOWN_BOUNCE");
+#if defined(STRATA_HIP_GFX906)
+            return v == nullptr || std::atoi(v) != 0;
+#else
+            return v != nullptr && std::atoi(v) != 0;
+#endif
+        }();
+        return on;
+    }
+    // member x's down part (in each of the g.dim rows of dr bytes, dh bytes from d0) from the host into dst: one DMA of
+    // the whole matrix into `bounce` and a device-side 2D copy out of it when there is one, else the 2D host copy
+    bool copy_down_part(uint8_t* dst, const uint8_t* src, size_t dr, size_t dh, size_t d0, uint8_t* bounce,
+                        size_t bounce_bytes, cudaStream_t cs) const {
+        const size_t whole = dr * (size_t) g.dim;
+        if (bounce != nullptr && whole <= bounce_bytes)
+            return cudaMemcpyAsync(bounce, src, whole, cudaMemcpyHostToDevice, cs) == cudaSuccess &&
+                   cudaMemcpy2DAsync(dst, dh, bounce + d0, dr, dh, (size_t) g.dim, cudaMemcpyDeviceToDevice, cs) == cudaSuccess;
+        return cudaMemcpy2DAsync(dst, dh, src + d0, dr, dh, (size_t) g.dim, cudaMemcpyHostToDevice, cs) == cudaSuccess;
+    }
     // expert e of l (on the CPU lane: its NH column parts) -> member m's VRAM copy at dst, in the GPU layout (the full
     // blob, or a group member's part), by DMA from the pinned parts on the copy stream (in place: from `src`, its file
     // region read into pinned staging)
     bool stream_expert(const Layer& l, int m, int e, uint8_t* dst, cudaStream_t cs, std::string& err,
-                       const uint8_t* src = nullptr) {
+                       const uint8_t* src = nullptr, uint8_t* bounce = nullptr, size_t bounce_bytes = 0) {
         if (l.lay.fmt == gg::kFmtMXFP4) {   // the blob, or member m's rows / blocks: from `src` (the expert read into
             // pinned staging as its blob) or from the file's mapping
             auto mat_r = [&](int r) { return src != nullptr ? src + l.lay.trellis[r] : mx_mat(l, e, r); };
@@ -4394,8 +4434,7 @@ struct Model::Impl {
                 for (int r = 0; r < 2; ++r)
                     ok = ok && cudaMemcpyAsync(dst + l.hlay.trellis[r], mat_r(r) + (size_t) x.ff0 * gr,
                                                (size_t) x.ffn * gr, cudaMemcpyHostToDevice, cs) == cudaSuccess;
-                ok = ok && cudaMemcpy2DAsync(dst + l.hlay.trellis[2], dh, mat_r(2) + d0, dr, dh,
-                                             (size_t) g.dim, cudaMemcpyHostToDevice, cs) == cudaSuccess;
+                ok = ok && copy_down_part(dst + l.hlay.trellis[2], mat_r(2), dr, dh, d0, bounce, bounce_bytes, cs);
             }
             if (!ok) err = "streaming layer " + std::to_string(l.il) + " expert " + std::to_string(e) + " failed";
             return ok;
@@ -4601,7 +4640,8 @@ struct Model::Impl {
                 }
                 uint8_t* dst = c.ring + ((size_t) half * (c.ring_n / P) + i) * c.ring_stride;
                 if (!stream_expert(l0, mi, l0.host_list[(size_t) (bt.j0 + i)], dst, c.cs, err,
-                                   sb != nullptr ? sb + (size_t) i * c.stage_stride : nullptr))
+                                   sb != nullptr ? sb + (size_t) i * c.stage_stride : nullptr, c.down_bounce,
+                                   c.down_bounce_bytes))
                     return false;
                 c.stream_bytes += (double) unit(member(l0, mi));
             }
@@ -4945,8 +4985,10 @@ struct Model::Impl {
                 const int t2 = gg::expert_type(l.lay, 2);
                 const Layer& x = member(l, it.mi);
                 const size_t dr = gg::type_row_bytes(t2, g.ff), dh = gg::type_row_bytes(t2, x.ffn), d0 = gg::type_row_bytes(t2, x.ff0);
-                CK(cudaMemcpy2DAsync(dst + lay.trellis[2], dh, it.src[2] + d0, dr, dh, (size_t) g.dim,
-                                     cudaMemcpyHostToDevice, c.cs));
+                if (!copy_down_part(dst + lay.trellis[2], it.src[2], dr, dh, d0, c.down_bounce, c.down_bounce_bytes, c.cs)) {
+                    err = "streaming layer " + std::to_string(it.il) + " expert " + std::to_string(it.e) + "'s down part failed";
+                    return false;
+                }
             } else
                 CK(cudaMemcpyAsync(dst + lay.trellis[2], it.src[2], mx_part_bytes(l, 2), cudaMemcpyHostToDevice, c.cs));
             CK(cudaEventRecord(c.ring_fill[r], c.cs));
