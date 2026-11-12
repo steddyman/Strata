@@ -177,6 +177,21 @@ bool tp_uneven() {
     }();
     return on;
 }
+// an uneven split's members each lay their part of an expert out for their own share, not all for the widest share
+// (DS4_TP_TIGHT=1 / 0; on by default on gfx906): of n_ff 2304 in shares of 1280 + 1024 the narrow member's slot is
+// 1024 wide, not 1280 - a tenth more experts in the same VRAM
+bool tp_tight() {
+    static const bool on = [] {
+        const char* e = std::getenv("DS4_TP_TIGHT");
+        if (e != nullptr) return e[0] == '1';
+#if defined(STRATA_HIP_GFX906)
+        return true;
+#else
+        return false;
+#endif
+    }();
+    return on;
+}
 
 std::string read_file(const std::string& p) {
     std::ifstream f(p);
@@ -2033,6 +2048,14 @@ struct Model::Impl {
     static const Layer& member(const Layer& l, int m) { return m == 0 ? l : l.mates[(size_t) m - 1]; }
     // bytes of a VRAM slot of l's experts (a member's part of each, in a group)
     static size_t unit(const Layer& l) { return l.nm > 1 ? l.hblob : l.blob; }
+    // layer l's member on device d (its own part's layout and slot size; l itself when the device holds none)
+    const Layer& on_dev(const Layer& l, const Dev& d) const {
+        const Layer& root = L[(size_t) l.il];
+        const int di = (int) (&d - &devs[0]);
+        for (int m = 0; m < root.nm; ++m)
+            if (member(root, m).dev == di) return member(root, m);
+        return l;
+    }
     // v1.1.18's prompt-path changes (the borrowed room and its chunk default, a short run's reads through the page cache,
     // the decode warm-up) by default on one GPU, where they were measured; on more as in v1.1.17 unless setting k
     // asks (1 on, 0 off)
@@ -2598,9 +2621,9 @@ struct Model::Impl {
         const size_t gr = gg::type_row_bytes(gg::expert_type(l.lay, 0), g.dim), dr = gg::type_row_bytes(t2, g.ff),
                      dh = gg::type_row_bytes(t2, x.ffn), d0 = gg::type_row_bytes(t2, x.ff0);
         for (int r = 0; r < 2; ++r)
-            std::memcpy(dst + l.hlay.trellis[r], blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, (size_t) x.ffn * gr);
+            std::memcpy(dst + x.hlay.trellis[r], blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, (size_t) x.ffn * gr);
         for (size_t row = 0; row < (size_t) g.dim; ++row)
-            std::memcpy(dst + l.hlay.trellis[2] + row * dh, blob + l.lay.trellis[2] + row * dr + d0, dh);
+            std::memcpy(dst + x.hlay.trellis[2] + row * dh, blob + l.lay.trellis[2] + row * dr + d0, dh);
     }
     void mx_half_to_blob(const Layer& l, const uint8_t* src, int m, uint8_t* blob) const {
         const Layer& x = member(l, m);
@@ -2608,9 +2631,9 @@ struct Model::Impl {
         const size_t gr = gg::type_row_bytes(gg::expert_type(l.lay, 0), g.dim), dr = gg::type_row_bytes(t2, g.ff),
                      dh = gg::type_row_bytes(t2, x.ffn), d0 = gg::type_row_bytes(t2, x.ff0);
         for (int r = 0; r < 2; ++r)
-            std::memcpy(blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, src + l.hlay.trellis[r], (size_t) x.ffn * gr);
+            std::memcpy(blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, src + x.hlay.trellis[r], (size_t) x.ffn * gr);
         for (size_t row = 0; row < (size_t) g.dim; ++row)
-            std::memcpy(blob + l.lay.trellis[2] + row * dr + d0, src + l.hlay.trellis[2] + row * dh, dh);
+            std::memcpy(blob + l.lay.trellis[2] + row * dr + d0, src + x.hlay.trellis[2] + row * dh, dh);
     }
 
     bool expert_layout(Layer& l, std::string& err) {
@@ -3219,7 +3242,9 @@ struct Model::Impl {
                     split128(g.ff, l.nm, m, x.ff0, x.ffn, l.il % l.nm);   // (rot: the odd blocks go round the members)
                 size_t off = 0;
                 for (int r = 0; r < 3; ++r) {
-                    const int fw = gguf_x ? ff_max : x.ffn;   // (a GGUF's layout: the widest share's, the same for every member)
+                    // (a GGUF's layout: the widest share's, the same for every member - or, tp_tight, the member's own
+                    // share's: an uneven split's narrow member then keeps no room for rows and blocks it does not hold)
+                    const int fw = gguf_x && !tp_tight() ? ff_max : x.ffn;
                     const int k = r < 2 ? g.dim : fw, n = r < 2 ? fw : g.dim;
                     x.hlay.K[r] = l.lay.K[r];
                     x.hlay.K[r] = l.lay.K[r];
@@ -4441,9 +4466,9 @@ struct Model::Impl {
                 const size_t gr = gg::type_row_bytes(gg::expert_type(l.lay, 0), g.dim), dr = gg::type_row_bytes(t2, g.ff),
                              dh = gg::type_row_bytes(t2, x.ffn), d0 = gg::type_row_bytes(t2, x.ff0);
                 for (int r = 0; r < 2; ++r)
-                    ok = ok && cudaMemcpyAsync(dst + l.hlay.trellis[r], mat_r(r) + (size_t) x.ff0 * gr,
+                    ok = ok && cudaMemcpyAsync(dst + x.hlay.trellis[r], mat_r(r) + (size_t) x.ff0 * gr,
                                                (size_t) x.ffn * gr, cudaMemcpyHostToDevice, cs) == cudaSuccess;
-                ok = ok && copy_down_part(dst + l.hlay.trellis[2], mat_r(2), dr, dh, d0, bounce, bounce_bytes, cs);
+                ok = ok && copy_down_part(dst + x.hlay.trellis[2], mat_r(2), dr, dh, d0, bounce, bounce_bytes, cs);
             }
             if (!ok) err = "streaming layer " + std::to_string(l.il) + " expert " + std::to_string(e) + " failed";
             return ok;
@@ -4981,7 +5006,7 @@ struct Model::Impl {
             if (c.n_dma >= R) CK(cudaStreamWaitEvent(c.cs, c.ring_free[r], 0));
             const Layer& l = L[(size_t) it.il];
             uint8_t* dst = c.ring + r * c.ring_stride;
-            const x3::ExpertLayout& lay = l.nm > 1 ? l.hlay : l.lay;
+            const x3::ExpertLayout& lay = l.nm > 1 ? member(l, it.mi).hlay : l.lay;
             if (it.direct) {   // (already in the slot)
                 CK(cudaEventRecord(c.ring_fill[r], c.cs));
                 c.stream_bytes += (double) unit(l);
@@ -5091,7 +5116,7 @@ struct Model::Impl {
                 x3::SetArgs sa;
                 sa.wbase = wbase + (size_t) (i0 - wb0) * stride;   // (wbase: set member wb0's blob)
                 sa.stride = stride;
-                sa.lay = l.nm > 1 ? l.hlay : l.lay;
+                sa.lay = l.nm > 1 ? on_dev(l, d).hlay : l.lay;   // (this device's member's)
                 sa.n_exp = j - i0;
                 sa.bounds = d_bounds + i0;
                 sa.row0 = a;
@@ -5830,8 +5855,8 @@ struct Model::Impl {
                         const Layer& x = member(l, m);
                         cudaSetDevice(devs[(size_t) x.dev].id);
                         if (l.nm > 1) blob_to_half(l, stage, m, stage2);
-                        ok = cudaMemcpy(sat(l, x, l.slot[(size_t) e], unit(l)), l.nm > 1 ? stage2 : stage,
-                                        unit(l), cudaMemcpyHostToDevice) == cudaSuccess;
+                        ok = cudaMemcpy(sat(l, x, l.slot[(size_t) e], unit(x)), l.nm > 1 ? stage2 : stage,
+                                        unit(x), cudaMemcpyHostToDevice) == cudaSuccess;
                     }
                     if (!ok) {
                         std::lock_guard<std::mutex> lk(emu);
@@ -8753,7 +8778,7 @@ struct Model::Impl {
             cudaSetDevice(devs[(size_t) x.dev].id);
             cudaStream_t cs = copy_st[(size_t) x.dev];
             if (l.nm > 1) blob_to_half(l, sw_a, m, sw_h);
-            ok = cudaMemcpyAsync(sat(l, x, l.spare_vram, unit(l)), l.nm > 1 ? sw_h : sw_a, unit(l),
+            ok = cudaMemcpyAsync(sat(l, x, l.spare_vram, unit(x)), l.nm > 1 ? sw_h : sw_a, unit(x),
                                  cudaMemcpyHostToDevice, cs) == cudaSuccess &&
                  cudaStreamSynchronize(cs) == cudaSuccess;
         }
@@ -8763,8 +8788,8 @@ struct Model::Impl {
                 const Layer& x = member(l, m);
                 cudaSetDevice(devs[(size_t) x.dev].id);
                 cudaStream_t cs = copy_st[(size_t) x.dev];
-                got = cudaMemcpyAsync(l.nm > 1 ? sw_h : sw_b, sat(l, x, l.slot[(size_t) sw.out], unit(l)),
-                                      unit(l), cudaMemcpyDeviceToHost, cs) == cudaSuccess &&
+                got = cudaMemcpyAsync(l.nm > 1 ? sw_h : sw_b, sat(l, x, l.slot[(size_t) sw.out], unit(x)),
+                                      unit(x), cudaMemcpyDeviceToHost, cs) == cudaSuccess &&
                       cudaStreamSynchronize(cs) == cudaSuccess;
                 if (got && l.nm > 1) half_to_blob(l, sw_h, m, sw_b);
             }
@@ -8786,11 +8811,11 @@ struct Model::Impl {
             }
         }
         if (check_swaps) {   // DS4_CHECK_SWAPS: the slot (and `out`'s RAM copy) against the model file, byte for byte
-            std::vector<uint8_t> dev(l.blob), h(unit(l)), file(l.blob);
+            std::vector<uint8_t> dev(l.blob), h(l.blob), file(l.blob);   // (h: any member's part)
             for (int m = 0; m < l.nm && ok; ++m) {
                 const Layer& x = member(l, m);
                 cudaSetDevice(devs[(size_t) x.dev].id);
-                cudaMemcpy(l.nm > 1 ? h.data() : dev.data(), sat(l, x, l.spare_vram, unit(l)), unit(l),
+                cudaMemcpy(l.nm > 1 ? h.data() : dev.data(), sat(l, x, l.spare_vram, unit(x)), unit(x),
                            cudaMemcpyDeviceToHost);
                 if (l.nm > 1) half_to_blob(l, h.data(), m, dev.data());
             }
