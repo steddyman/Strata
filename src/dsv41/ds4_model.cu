@@ -13030,9 +13030,20 @@ struct Model::Impl {
         for (int il = 0; il < g.nl && yl < 0; ++il)
             if (g.ratios[(size_t) il] == 1) yl = il;
         if (yl <= 0 || !L[(size_t) yl].kv_src) return -1;
+        // one GPU - or (DS4_YOCO_TP=1; on by default on gfx906) one tensor-parallel group that holds every layer: its
+        // members run each chunk of each layer together, so the skip is the same rows left out on each of them
+        static const bool tp_ok = [] {
+            const char* e = std::getenv("DS4_YOCO_TP");
+            if (e != nullptr) return e[0] == '1';
+#if defined(STRATA_HIP_GFX906)
+            return true;
+#else
+            return false;
+#endif
+        }();
         for (int il = 0; il < g.nl; ++il) {
             const Layer& l = L[(size_t) il];
-            if (l.nm != 1 || l.dev != L[0].dev) return -1;
+            if (l.dev != L[0].dev || l.grp != L[0].grp || l.nm != L[0].nm || (l.nm != 1 && !tp_ok)) return -1;
             if (il > yl && (g.ratios[(size_t) il] != 1 || l.kv_src)) return -1;
         }
         return yl;
