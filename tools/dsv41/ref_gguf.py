@@ -197,14 +197,17 @@ class RefGguf(R.Ref):
         T, cols = hash_ids.shape
         hd = self.lay.head_dim
         dt = self.st.t[P + "embed.weight"][0]
-        rb = hd // 256 * 210 if dt == "Q6_K" else hd // 32 * 33        # (a row's bytes: Q6_K or MXFP8 blocks)
-        tab = self.st.raw(P + "embed.weight").reshape(-1, rb)
+        nrows = self.st.t[P + "embed.weight"][4][0]
+        tab = self.st.raw(P + "embed.weight").reshape(nrows, -1)          # a row's bytes, whatever the block type
+        rb = tab.shape[1]
         flat = hash_ids.reshape(-1)
         order = np.argsort(flat)
         rows = np.empty((flat.size, rb), np.uint8)
         rows[order] = tab[flat[order]]
         if dt == "Q6_K":
             e = torch.from_numpy(q6k_rows(rows, P)).to(self.dev).view(T, cols * hd)
+        elif dt != "MXFP8":   # another GGUF type (an ISTA-DAS pack's IQ4_NL table): gguf-py's dequantiser
+            e = torch.from_numpy(gq_values(rows.reshape(-1), dt, P + "embed.weight")).to(self.dev).view(T, cols * hd)
         else:
             b = torch.from_numpy(rows).to(self.dev).view(-1, 33)
             s = torch.ldexp(torch.ones(1, device=self.dev), b[:, :1].int() - 127)
@@ -213,7 +216,10 @@ class RefGguf(R.Ref):
         kv = e @ self.W(P + "wkv").T
         d, hc = self.dim, self.hc
         key, value = kv[:, :hc * d].view(T, hc, d), kv[:, hc * d:]
-        w = self.V(P + "gate.weight")                                     # q_weight * k_weight (folded)
+        if self.st.has(P + "gate.weight"):
+            w = self.V(P + "gate.weight")                                 # q_weight * k_weight (folded)
+        else:                                                             # a pack that keeps the two (ISTA-DAS)
+            w = self.V(P + "q_weight") * self.V(P + "k_weight")
         h = x.float()
         rstd = torch.rsqrt(h.square().mean(-1) + self.eps) * torch.rsqrt(key.square().mean(-1) + self.eps)
         dot = (h * w * key).sum(-1) * rstd * d ** -0.5
@@ -248,9 +254,14 @@ class RefGguf(R.Ref):
         # ref.py's forward reads the embedding rows as BF16: a Q8_0 table is dequantised for the rows asked
         dt = self.st.t["embed.weight"][0]
         if dt != "BF16":
-            full = self.st.raw("embed.weight").reshape(-1, self.dim // 32 * 34)
-            sel = torch.from_numpy(np.array(full[np.asarray(ids)])).to(self.dev).view(-1, 34)
-            v = (sel[:, :2].contiguous().view(torch.float16).float() * sel[:, 2:].view(torch.int8).float())
+            raw = self.st.raw("embed.weight")
+            full = raw.reshape(self.st.t["embed.weight"][4][0], -1)   # a row a token, whatever the block type
+            sel = np.array(full[np.asarray(ids)])
+            if dt == "Q8_0":
+                s = torch.from_numpy(sel).to(self.dev).view(-1, 34)
+                v = s[:, :2].contiguous().view(torch.float16).float() * s[:, 2:].view(torch.int8).float()
+            else:   # another GGUF type (an ISTA-DAS pack's Q5_K table): gguf-py's dequantiser for the rows asked
+                v = torch.from_numpy(gq_values(sel.reshape(-1), dt, "embed.weight"))
             rows = v.reshape(len(ids), self.dim).to(torch.bfloat16).view(torch.uint16).cpu().numpy()
             raw0 = self.st.raw
             emb = np.zeros((max(ids) + 1, self.dim), np.uint16)

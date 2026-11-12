@@ -30,7 +30,10 @@ import torch.nn.functional as F
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import engram_hash as EH  # noqa: E402
-import exl3_torch as ET  # noqa: E402
+try:
+    import exl3_torch as ET  # noqa: E402  (the EXL3 packs only; ref_gguf.py overrides every use)
+except ImportError:
+    ET = None
 from st import SafeTensors  # noqa: E402
 
 
