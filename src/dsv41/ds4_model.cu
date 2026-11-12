@@ -1389,7 +1389,16 @@ struct Model::Impl {
     static float env_f(const char* k, float d) { return std::getenv(k) ? (float) std::atof(std::getenv(k)) : d; }
     const float c_margin = env_f("DS4_CACHE_MARGIN", 1.25f), c_bonus = env_f("DS4_CACHE_BONUS", 1.0f),
                 c_decay = env_f("DS4_CACHE_DECAY", 0.9f);
-    const int c_inflight = std::max(1, (int) env_f("DS4_CACHE_INFLIGHT", (float) kMaxSwaps));
+    // gfx906 (two Vega 20 dies, ~35 % of the experts in VRAM, the rest on the CPU lane): 32 swaps under way on 4 threads,
+    // and a settle after the prompt that grows with it (cache_settle).  Measured on the Mac Pro 2019, ISTA-DAS 2.00, a
+    // 13.9K-token prompt then 256 tokens: 25.2 -> 30.2 tok/s (the CPU lane 10441 -> 5771 of 61200 experts), the prompt
+    // 87.2 -> 91.2 s; the swap threads alone (the old 800 ms settle) 26.8 tok/s
+#if defined(STRATA_HIP_GFX906)
+    static constexpr int kInflightDefault = 32, kCacheThreadsDefault = 4;
+#else
+    static constexpr int kInflightDefault = kMaxSwaps, kCacheThreadsDefault = 1;
+#endif
+    const int c_inflight = std::max(1, (int) env_f("DS4_CACHE_INFLIGHT", (float) kInflightDefault));
     // the RAM tier (a GGUF's in-place experts, as GLM's: the hottest in VRAM, the next hottest here, the coldest in the
     // files): RAM slots of one expert blob each, filled at load with the hottest experts VRAM does not hold, so the
     // CPU lane reads them from RAM; between windows (cache_tick) a hotter expert from the files takes the place of the
@@ -3833,7 +3842,7 @@ struct Model::Impl {
         if (o.expert_cache) {
             size_t maxb = 0;
             for (const Layer& l : L) maxb = std::max(maxb, l.blob);
-            const int nt = std::max(1, std::min(c_inflight, std::getenv("DS4_CACHE_THREADS") ? std::atoi(std::getenv("DS4_CACHE_THREADS")) : 1));
+            const int nt = std::max(1, std::min(c_inflight, std::getenv("DS4_CACHE_THREADS") ? std::atoi(std::getenv("DS4_CACHE_THREADS")) : kCacheThreadsDefault));
             sw_bufs.resize((size_t) nt);
             for (SwapBufs& B : sw_bufs) {
                 if (!halloc(B.a, maxb, err) || !halloc(B.b, maxb, err) || !halloc(B.h, maxb, err)) return false;
@@ -8811,9 +8820,17 @@ struct Model::Impl {
     // What the swaps buy is decode: about 10% on a 256-token answer, i.e. 6.2 s of prompt against 1.6 s of decode on that
     // answer and nothing at all on a 50-300-token tool-call answer.  800 ms keeps the hottest of them and gives the prompt
     // back about 5 s (the plan's own table: prompt + 256 tokens, 27.2 s at 6,000 ms, 23.9 s at 800, 23.4 s at 0).
-    void cache_settle() {
+    // gfx906: the budget grows with the prompt - about 7 % of its time (0.5 ms a token at ~150 tok/s), 800 ms at least
+    // and 5,000 ms at most - because there the CPU lane is what a decode token waits for (see kInflightDefault)
+    void cache_settle(int took = 0) {
         if (!o.expert_cache || cache_ths.empty()) return;
-        static const double budget = env_f("DS4_SETTLE_MS", 800.0f);
+        static const double budget_env = env_f("DS4_SETTLE_MS", -1.0f);
+        double budget = budget_env >= 0.0 ? budget_env : 800.0;
+#if defined(STRATA_HIP_GFX906)
+        if (budget_env < 0.0) budget = std::min(5000.0, std::max(800.0, 0.5 * (double) took));
+#else
+        (void) took;
+#endif
         if (budget <= 0.0) return;
         const double t0 = now_ms();
         const int64_t s0 = st.swaps;
@@ -13286,7 +13303,7 @@ struct Model::Impl {
             lm_end();
             lm_end_.on = false;
         }
-        cache_settle();
+        cache_settle(took);
         warm_after(took);
         // (the drafter seeded from the run's last rows - when they went through every layer: not after a yield)
         const int nr = std::min({T_last, tap_cap, a > 0 ? n - a : n});   // (the rows that went through every layer)
