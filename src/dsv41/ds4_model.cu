@@ -14187,14 +14187,17 @@ struct Model::Impl {
         hc_mix_split(d.h, l.hca_fn, H * D, (2 + H) * H, T, g.eps, d.mix, l.hca_scale, l.hca_base, H,
                      g.sinkhorn, g.hc_eps, d.a_pre, d.a_post, d.a_comb, s);
 #else
-        hc_mix_split(d.h, l.hca_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hca_scale, l.hca_base, H, g.sinkhorn, g.hc_eps,
-                     d.a_pre, d.a_post, d.a_comb, s);
+        // (with the pre-norm below, which reads h and the previous layer's pre: one launch on gfx906)
+        hc_mix_split_norm(d.h, l.hca_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hca_scale, l.hca_base, H, g.sinkhorn, g.hc_eps,
+                          d.a_pre, d.a_post, d.a_comb, d.pre, l.attn_norm, d.x, s);
 #endif
         dump_sub(d, "a_mix", l.il, p0, T, d.mix, (size_t) T * 32 * 4);
         dump_sub(d, "a_pre", l.il, p0, T, d.a_pre, (size_t) T * 8 * 4);
         dump_sub(d, "a_post", l.il, p0, T, d.a_post, (size_t) T * 8 * 4);
         dump_sub(d, "a_comb", l.il, p0, T, d.a_comb, (size_t) T * 64 * 4);
+#if defined(STRATA_METAL)
         hc_pre_norm(d.h, d.pre, l.attn_norm, D, H, T, g.eps, d.x, s);
+#endif
         dump_sub(d, "pre_in", l.il, p0, T, d.pre, (size_t) T * 8 * 4);
         dump_sub(d, "attn_x", l.il, p0, T, d.x, (size_t) T * D * 4);
         {
@@ -14260,10 +14263,12 @@ struct Model::Impl {
         hc_mix_split(d.h, l.hcf_fn, H * D, (2 + H) * H, T, g.eps, d.mix, l.hcf_scale, l.hcf_base, H,
                      g.sinkhorn, g.hc_eps, d.f_pre, d.f_post, d.f_comb, s);
 #else
-        hc_mix_split(d.h, l.hcf_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hcf_scale, l.hcf_base, H, g.sinkhorn, g.hc_eps,
-                     d.f_pre, d.f_post, d.f_comb, s);
+        hc_mix_split_norm(d.h, l.hcf_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hcf_scale, l.hcf_base, H, g.sinkhorn, g.hc_eps,
+                          d.f_pre, d.f_post, d.f_comb, d.a_pre, l.ffn_norm, d.x, s);
 #endif
+#if defined(STRATA_METAL)
         hc_pre_norm(d.h, d.a_pre, l.ffn_norm, D, H, T, g.eps, d.x, s);
+#endif
         dump_sub(d, "f_pre", l.il, p0, T, d.f_pre, (size_t) T * 8 * 4);
         dump_sub(d, "f_post", l.il, p0, T, d.f_post, (size_t) T * 8 * 4);
         dump_sub(d, "f_comb", l.il, p0, T, d.f_comb, (size_t) T * 64 * 4);
