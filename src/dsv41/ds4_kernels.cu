@@ -2138,6 +2138,11 @@ constexpr int kSplitG = 4, kSplitR = 40, kSplitCap = 24, kSplitMaxT = 5;
 bool split_enabled() {
     static const bool on = [] {
         const char* e = std::getenv("DS4_ATTN_SPLIT");
+#if defined(STRATA_HIP_GFX906)
+        // on by default on gfx906 (two Vega 20 dies, 32 heads a die): after a 13.9K-token prompt the decode's
+        // attention 31.9 -> 26.7 ms a token over both dies, 30.3 -> 32.1 tok/s (Mac Pro 2019, ISTA-DAS 2.00); =0: off
+        if (e == nullptr) return true;
+#endif
         return e != nullptr && std::atoi(e) != 0;   // opt-in: no gain measured on 4x R9700 (21.8 vs 21.9 tok/s)
     }();
     return on;
