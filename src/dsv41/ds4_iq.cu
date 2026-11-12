@@ -837,6 +837,106 @@ __global__ void __launch_bounds__(kThreads) set_kernel(const SetArgs a) {
     }
 }
 
+#if defined(STRATA_HIP_GFX906)
+// gfx906 (Vega 20: v_dot2_f32_f16, no matrix cores): set_kernel with the tile's operands F16 in shared memory, two K
+// values a word, and each thread's sums by fdot2 (acc + x0 w0 + x1 w1, F32) - half the shared-memory reads and half
+// the instructions of the F32 FMAs.  The operands are rounded as the tensor-core tiles round theirs (set_tc_kernel: F16
+// activations and weights, F32 sums), so the outputs differ from set_kernel's by that rounding.  DS4_G906_SET16=0: set_kernel.
+typedef _Float16 g906_h2 __attribute__((ext_vector_type(2)));
+__device__ __forceinline__ uint32_t g906_pack_h2(float a, float b) {
+    return (uint32_t) __half_as_ushort(__float2half_rn(a)) | ((uint32_t) __half_as_ushort(__float2half_rn(b)) << 16);
+}
+__device__ __forceinline__ float g906_fdot2(uint32_t x, uint32_t w, float acc) {
+    g906_h2 xv, wv;
+    __builtin_memcpy(&xv, &x, 4);
+    __builtin_memcpy(&wv, &w, 4);
+    return __builtin_amdgcn_fdot2(xv, wv, acc, false);
+}
+template <int T, bool GATE_UP, int RM = BM>
+__global__ void __launch_bounds__(kThreads) set_f16_kernel(const SetArgs a) {
+    constexpr int RT = RM / (kThreads / (BN / TN));
+    static_assert(RT >= 1 && RT * (kThreads / (BN / TN)) == RM, "the block's rows");
+    __shared__ uint32_t tab[Ty<T>::TAB > 0 ? Ty<T>::TAB : 1];
+    __shared__ uint32_t wg[16][BN + 1];
+    __shared__ uint32_t wu[GATE_UP ? 16 : 1][BN + 1];
+    __shared__ uint32_t xs[RM][17];
+    __shared__ int src[RM];
+    const int e = blockIdx.z;
+    const int lo = a.bounds[e] - a.row0, hi = a.bounds[e + 1] - a.row0;
+    const int r0 = lo + blockIdx.x * RM;
+    if (r0 >= hi || hi - lo <= a.skip_le) return;   // (uniform; skip_le: the light kernels' experts)
+    if (a.skip_ge > 0 && hi - lo >= a.skip_ge) return;   // (the caller's FP16 GEMMs')
+    load_tab<T>(tab);
+    const int nr = min(RM, hi - r0);
+    const int c0 = blockIdx.y * BN;
+    const uint8_t* blob = a.wbase + (size_t) e * a.stride;
+    const int K = GATE_UP ? a.n_embd : a.n_ff;
+    const size_t rb = row_bytes_t<T>(K);
+    const int tid = (int) threadIdx.x;
+    if (tid < RM) src[tid] = tid < nr ? (GATE_UP ? a.idx[r0 + tid] : r0 + tid) : -1;
+    __syncthreads();
+    const int ty = tid / (BN / TN), tx = tid % (BN / TN);
+    const int tr = tid >> 2, tq = tid & 3;
+    float ag[RT][TN], au[RT][TN];
+#pragma unroll
+    for (int i = 0; i < RT; ++i)
+#pragma unroll
+        for (int j = 0; j < TN; ++j) ag[i][j] = au[i][j] = 0.0f;
+    for (int kb = 0; kb < K / 32; ++kb) {
+        float w8[8];
+        deq8<T>(blob + a.tr[GATE_UP ? 0 : 2] + (size_t) (c0 + tr) * rb, kb, tq, tab, w8);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) wg[tq * 4 + j][tr] = g906_pack_h2(w8[2 * j], w8[2 * j + 1]);
+        if (GATE_UP) {
+            deq8<T>(blob + a.tr[1] + (size_t) (c0 + tr) * rb, kb, tq, tab, w8);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) wu[tq * 4 + j][tr] = g906_pack_h2(w8[2 * j], w8[2 * j + 1]);
+        }
+        for (int i = tid; i < RM * 16; i += kThreads) {
+            const int r = i / 16, c = i % 16, sr = src[r];
+            uint32_t v = 0u;
+            if (sr >= 0) {
+                const size_t at = (size_t) sr * a.ldx + (size_t) kb * 32 + (size_t) (2 * c);
+                v = GATE_UP ? g906_pack_h2(a.xf[at], a.xf[at + 1]) : ((uint32_t) a.xh[at] | ((uint32_t) a.xh[at + 1] << 16));
+            }
+            xs[r][c] = v;
+        }
+        __syncthreads();
+#pragma unroll 8
+        for (int kk = 0; kk < 16; ++kk) {
+            uint32_t xv[RT], gw[TN], uw[TN];
+#pragma unroll
+            for (int i = 0; i < RT; ++i) xv[i] = xs[ty * RT + i][kk];
+#pragma unroll
+            for (int j = 0; j < TN; ++j) {
+                gw[j] = wg[kk][tx * TN + j];
+                if (GATE_UP) uw[j] = wu[kk][tx * TN + j];
+            }
+#pragma unroll
+            for (int i = 0; i < RT; ++i)
+#pragma unroll
+                for (int j = 0; j < TN; ++j) {
+                    ag[i][j] = g906_fdot2(xv[i], gw[j], ag[i][j]);
+                    if (GATE_UP) au[i][j] = g906_fdot2(xv[i], uw[j], au[i][j]);
+                }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < RT; ++i) {
+        const int r = ty * RT + i;
+        if (r >= nr) continue;
+        const size_t lr = (size_t) (r0 + r);
+#pragma unroll
+        for (int j = 0; j < TN; ++j) {
+            const int c = c0 + tx * TN + j;
+            if (GATE_UP) a.h[lr * a.ldo + c] = __half_as_ushort(__float2half_rn(swiglu(ag[i][j], au[i][j], a.limit)));
+            else a.y[lr * a.ldo + c] = ag[i][j];
+        }
+    }
+}
+#endif
+
 #if !defined(STRATA_USE_HIP)
 // the same on the tensor cores (sm_70+): 8 warps each 16 rows x 32 outputs, the tiles F16 in shared memory
 namespace wm = nvcuda::wmma;
@@ -1403,6 +1503,19 @@ template <int T, bool GU>
 void launch_set(const SetArgs& a, dim3 grid, cudaStream_t s) {
 #if defined(STRATA_USE_HIP)
     if (hipk::launch<T, GU>(a, s)) return;   // (gfx12, STRATA_DS4_HIPK=1: the matrix-core tiles)
+#endif
+#if defined(STRATA_HIP_GFX906)
+    // (on by default: a 13.9K-token prompt's expert kernels 41.3 -> 17.8 s, 4.3 -> 8.1 TFLOPS, the prompt 248 -> 318 tok/s on
+    //  the Mac Pro 2019; the prompt path's last 12 rows of a 428-token text against the CPU reference: KL 0.0088, set_kernel's 0.0125)
+    static const bool s16 = [] { const char* e = std::getenv("DS4_G906_SET16"); return !(e && e[0] == '0'); }();
+    if (s16) {   // (the F16 fdot2 tiles)
+        if (a.max_rows <= 16) {
+            grid.x = (unsigned) ((a.max_rows + 15) / 16);
+            strata_ds4_launch(set_f16_kernel<T, GU, 16>, grid, kThreads, 0, s, a);
+        } else
+            strata_ds4_launch(set_f16_kernel<T, GU>, grid, kThreads, 0, s, a);
+        return;
+    }
 #endif
 #if !defined(STRATA_USE_HIP)
     if (tc_ok()) {
