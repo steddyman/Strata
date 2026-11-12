@@ -104,11 +104,15 @@ not measured end to end. How it was done: [GFX906_KERNEL_PLAN.md](GFX906_KERNEL_
 | Decode, MTP drafting (the app's default) | 128–196 tok/s | 115–188 | 107–160 |
 | Decode, no drafting | 114 | 106 | 102 |
 | Prompt, 4K tokens | 1,345 | 1,318 | 1,182 |
+| Decode after a 16K prompt, no drafting (engine 0.1.59.20) | 101 | | 92 |
+| Decode after a 16K prompt, no drafting (0.1.59.19 and before) | 50 | | 48 |
 
 - Q4 fits on one die and is about 7 % faster there; select both cards for Q6 / Q8_0, which need both (the layers split
   across the dies, every expert in VRAM).
 - Checked against llama.cpp (KL 3.3e-3 for Q4, 3.8e-3 for Q8_0); Q4 on two dies is bit-for-bit the one-die output, and
   drafting gives the same text as no drafting.
+- Up to 0.1.59.19 decode halved after a 16K prompt: each of the 16 query heads read the shared K / V cache on its
+  own, 8 times the bytes. 0.1.59.20 reads it once for the 8 heads of a KV head (32K prompt: 31 -> 89 tok/s on one die).
 - Not tested on two dies: Q6, pictures.
 - Details: [QWEN36.md](QWEN36.md#gfx906-vega-20-radeon-pro-vii-mi50-vega-ii).
 
@@ -147,7 +151,7 @@ Run on 12 November 2026 with the engines above, both dies, GPU power level `auto
 
 The functional checks are instruction following (JSON and exact text), retrieval from 4K and 16K prompts, and tool
 calls ([BENCHMARK_PROTOCOL.md](BENCHMARK_PROTOCOL.md)). The benchmark's speeds at 4K / 16K prompts: Qwen3.6 Q8_0
-reads 1,073 / 899 tok/s and decodes 84 / 47 tok/s; Qwen3.8 IQ3_XXS reads 475 / 661 and decodes 78 / 72; DeepSeek read
+reads 1,073 / 899 tok/s and decodes 84 / 47 tok/s (engine 0.1.59.18; 0.1.59.20 decodes ~92 after the 16K prompt); Qwen3.8 IQ3_XXS reads 475 / 661 and decodes 78 / 72; DeepSeek read
 only 19 / 36 tok/s on engine 0.1.59.18 (a 3,000-token prompt waited about 2.5 minutes for its first token; 143 / 159 tok/s
 since 0.1.59.19, see above) and decodes 28 at every length.
 

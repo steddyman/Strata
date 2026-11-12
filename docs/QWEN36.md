@@ -138,7 +138,11 @@ Measured on a Mac Pro 2019's Radeon Pro Vega II Duo with the GPU power level on 
 
 - The packed Q8_0 dense rows: `g906_q8p_kernel` (`STRATA_G906_Q8P=0` turns it off).
 - The FP32 router and GDN alpha / beta rows, the residual norm and the MoE combine: `src/qwen35/q36_g906.cuh`.
-- The attention scores: `k_attn_part_g906`, 16 lanes a cell.
+- The decode attention: `k_attn_part_gqa`, one block for a KV head's 8 query heads, so each K / V row is read once
+  instead of 8 times (`k_attn_part_g906`, a block a head, 16 lanes a cell: `STRATA_Q36_GQA=0`). Decode after a long
+  prompt, Q4 on one die, no drafting: 4K 95 -> 110 tok/s, 16K 50 -> 101, 32K 31 -> 89; Q8_0 on two dies at 16K
+  48 -> 92. Short prompts are within ~1 % (113 vs 114). Against llama.cpp on the 10 parity prompts the mean KL is 3.8e-3
+  (5.8e-3 with the one-head kernel); drafting still gives the same text.
 - The Q4_K / Q5_K experts: gate/up, SwiGLU and q8_1 in one launch (`g906_kq_gu_kernel`) and the down rows
   (`g906_kq_down_kernel`). `STRATA_G906_KQ=0` turns them off.
 

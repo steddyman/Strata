@@ -421,6 +421,125 @@ __global__ void __launch_bounds__(256) k_attn_part_g906(const float* q, const fl
         pl[o] = lsum;
     }
 }
+/// k_attn_part_g906 for a KV head's G query heads at once (grouped-query attention: each K / V row read once for the G
+/// heads instead of once a head - the one-head kernel read the cache G = 8 times).  grid (n_chunk, n_t * HKV), block 256.
+/// Scores: 32 lanes a cell (a lane 8 of the 256 dims, its K row piece in registers, the G queries from LDS), 8 cells at a
+/// time; the softmax a wavefront two heads; the V sums a thread a dim with G accumulators.  The partials of rows
+/// t * H + kvh * G + i, as k_attn_part writes them; each row's arithmetic is its own (independent of the token count).
+/// STRATA_Q36_GQA=0: the one-head kernel (k_attn_part_g906) instead of k_attn_part_gqa
+inline int q36_gqa_heads() {   // STRATA_Q36_GQA_HEADS: 8 (a block a KV head) or 4 (two)
+    static const int v = [] { const char* e = std::getenv("STRATA_Q36_GQA_HEADS"); return e && std::atoi(e) == 4 ? 4 : 8; }();
+    return v;
+}
+inline bool q36_gqa_on() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_Q36_GQA"); return !(e && e[0] == '0'); }();
+    return v;
+}
+template <int G, int GB>
+__global__ void __launch_bounds__(256) k_attn_part_gqa(const float* q, const float* kc, const float* vc, const int32_t* pos0,
+                                                       int t0, int H, int HKV, int ctx, float scale, int n_chunk, float* pacc,
+                                                       float* pm, float* pl, RowSel rs) {
+    constexpr int HD = 256;
+    static_assert(GB == 4 || GB == 8, "one or two heads a wavefront");
+    static_assert(G % GB == 0, "the group's heads in whole blocks");
+    constexpr int NB = G / GB;   // blocks a KV head
+    __shared__ __align__(16) float qs[GB][HD];
+    __shared__ float sc[GB][kChunkCells];
+    const int c = blockIdx.x, hb = blockIdx.y % NB, kvh = (blockIdx.y / NB) % HKV, t = t0 + blockIdx.y / (NB * HKV);
+    const int h0 = kvh * G + hb * GB;   // this block's first head
+    const int npos = (rs.cell ? rs.cell[t] : *pos0 + t) + 1;
+    if (rs.kc) {
+        kc = rs.kc[rs.slot[t]];
+        vc = rs.vc[rs.slot[t]];
+    }
+    const int p0 = c * kChunkCells;
+    if (p0 >= npos) return;
+    const int n = min(kChunkCells, npos - p0);
+    const int j = threadIdx.x;
+    const float* qb = q + ((size_t) t * H + (size_t) h0) * HD;
+#pragma unroll
+    for (int i = 0; i < GB; ++i) qs[i][j] = qb[(size_t) i * HD + j];
+    __syncthreads();
+    const int slot = j >> 5, l = j & 31;   // a cell's 32 lanes, 8 dims a lane
+    const float* kb = kc + ((size_t) kvh * ctx + p0) * HD + 8 * l;
+    for (int cb = slot; cb < n; cb += 32) {   // cells cb, cb + 8, cb + 16, cb + 24: four K loads in flight
+        float4 k[4][2];
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            const float4* kp = (const float4*) (kb + (size_t) min(cb + 8 * u, n - 1) * HD);
+            k[u][0] = kp[0];
+            k[u][1] = kp[1];
+        }
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            float a[GB];
+#pragma unroll
+            for (int i = 0; i < GB; ++i) {
+                const float4 x0 = ((const float4*) &qs[i][8 * l])[0], x1 = ((const float4*) &qs[i][8 * l])[1];
+                a[i] = x0.x * k[u][0].x + x0.y * k[u][0].y + x0.z * k[u][0].z + x0.w * k[u][0].w + x1.x * k[u][1].x +
+                       x1.y * k[u][1].y + x1.z * k[u][1].z + x1.w * k[u][1].w;
+            }
+#pragma unroll
+            for (int m = 16; m > 0; m >>= 1)
+#pragma unroll
+                for (int i = 0; i < GB; ++i) a[i] += __shfl_xor(a[i], m, 32);
+            if (l < GB && cb + 8 * u < n) {   // (lane i writes head i's score: every lane holds all G sums)
+                float v = a[0];
+#pragma unroll
+                for (int i = 1; i < GB; ++i)
+                    if (l == i) v = a[i];
+                sc[l][cb + 8 * u] = v * scale;
+            }
+        }
+    }
+    __syncthreads();
+    {   // softmax: wavefront w heads 2w, 2w + 1, a lane 4 cells of each
+        const int w = j >> 6, ln = j & 63;
+#pragma unroll
+        for (int hh = 0; hh < GB / 4; ++hh) {
+            const int i = (GB / 4) * w + hh;
+            float sv[4], mx = -INFINITY;
+#pragma unroll
+            for (int u = 0; u < 4; ++u) {
+                const int cc = ln + 64 * u;
+                sv[u] = cc < n ? sc[i][cc] : -INFINITY;
+                mx = fmaxf(mx, sv[u]);
+            }
+#pragma unroll
+            for (int m = 32; m > 0; m >>= 1) mx = fmaxf(mx, __shfl_xor(mx, m, 64));
+            float sum = 0.f;
+#pragma unroll
+            for (int u = 0; u < 4; ++u) {
+                const int cc = ln + 64 * u;
+                const float e = cc < n ? expf(sv[u] - mx) : 0.f;
+                sc[i][cc] = e;
+                sum += e;
+            }
+#pragma unroll
+            for (int m = 32; m > 0; m >>= 1) sum += __shfl_xor(sum, m, 64);
+            if (ln == 0) {
+                const size_t o = ((size_t) t * H + (size_t) h0 + i - (size_t) t0 * H) * n_chunk + c;
+                pm[o] = mx;
+                pl[o] = sum;
+            }
+        }
+    }
+    __syncthreads();
+    float acc[GB];
+#pragma unroll
+    for (int i = 0; i < GB; ++i) acc[i] = 0.f;
+    const float* vp = vc + ((size_t) kvh * ctx + p0) * HD + j;
+    for (int k = 0; k < n; ++k) {
+        const float v = vp[(size_t) k * HD];
+#pragma unroll
+        for (int i = 0; i < GB; ++i) acc[i] += sc[i][k] * v;
+    }
+#pragma unroll
+    for (int i = 0; i < GB; ++i) {
+        const size_t o = ((size_t) t * H + (size_t) h0 + i - (size_t) t0 * H) * n_chunk + c;
+        pacc[o * HD + j] = acc[i];
+    }
+}
 #endif
 /// The chunks merged, times sigmoid(gate): grid (n_rows), block HD.
 __global__ void k_attn_merge(const float* pacc, const float* pm, const float* pl, const float* gate,
@@ -2275,7 +2394,11 @@ struct Engine {
                     const int nc = graph_mode ? n_chunk
                                               : (int) std::min<int64_t>(n_chunk, (p0 + t0 + nt + kChunkCells - 1) / kChunkCells);
 #if defined(STRATA_HIP_GFX906)
-                    if (q36g::on() && HD == 256)
+                    if (q36g::on() && HD == 256 && H == 8 * HKV && q36_gqa_on())
+                        (q36_gqa_heads() == 4 ? k_attn_part_gqa<8, 4> : k_attn_part_gqa<8, 8>)<<<dim3(nc, nt * HKV * (8 / q36_gqa_heads())), 256, 0, st>>>(q, rows_mode ? nullptr : kc[li],
+                                                                      rows_mode ? nullptr : vc[li], dpos, t0, H, HKV, ctx,
+                                                                      1.0f / sqrtf((float) HD), n_chunk, pacc, pm, pl, rs);
+                    else if (q36g::on() && HD == 256)
                         k_attn_part_g906<<<dim3(nc, nt * H), kChunkCells, 0, st>>>(q, rows_mode ? nullptr : kc[li],
                                                                              rows_mode ? nullptr : vc[li], dpos, t0, H, HKV, ctx,
                                                                              1.0f / sqrtf((float) HD), n_chunk, pacc, pm, pl, rs);
