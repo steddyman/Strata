@@ -506,7 +506,22 @@ inline void* anon_alloc(size_t bytes, int node, int nodes) {
 #else
     void* m = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (m == MAP_FAILED) return nullptr;
-    madvise(m, bytes, MADV_HUGEPAGE);
+    // DS4_ANON_THP=0: ordinary 4 KB pages (the default on gfx906; =1 asks for huge pages there too).  Asking for huge
+    // pages makes the kernel compact memory (direct compaction at the faults, kcompactd after them), and compaction
+    // moves the pages of the host memory the GPU driver has mapped (ROCm's "pinned" memory is userptr, not
+    // page-locked): each move stops every queue of the process until the driver has mapped the pages again.  On the
+    // two-die Vega II (192 GB, 86 GB of experts copied into RAM) both dies froze for 1-6 s at a time, several times in
+    // 256 tokens, in about 4 runs of 10: 28 -> 8-20 tok/s.  Without the request: 8 runs of 8 at 27.4-28.2 tok/s, the
+    // CPU lane's time per token unchanged (12.0-13.0 ms against 12.0-12.5).
+    {
+        const char* e = std::getenv("DS4_ANON_THP");
+#if defined(STRATA_HIP_GFX906)
+        const bool thp = e != nullptr && e[0] == '1';
+#else
+        const bool thp = e == nullptr || e[0] != '0';
+#endif
+        if (thp) madvise(m, bytes, MADV_HUGEPAGE);
+    }
     if (node >= 0 && nodes > 1) {
         unsigned long mask[4] = {0, 0, 0, 0};
         mask[node / 64] = 1ul << (node % 64);
