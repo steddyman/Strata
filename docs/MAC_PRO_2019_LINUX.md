@@ -129,6 +129,30 @@ not measured end to end. How it was done: [GFX906_KERNEL_PLAN.md](GFX906_KERNEL_
   load reads about 130 GB and takes several minutes.
 - Details: [DEEPSEEK41.md](DEEPSEEK41.md#gfx906-mac-pro-2019-radeon-pro-vega-ii-duo).
 
+## Quality checks
+
+Run on 12 November 2026 with the engines above, both dies, GPU power level `auto`:
+
+| Model | Functional checks (`strata bench run`, 12 cases) | Logits |
+| --- | --- | --- |
+| Qwen3.8-Flash-Next IQ3_XXS | 12 / 12 | `tools/quant_quality.py` against the gated 0.1.59.15 run: 100 % top-1, KL 0 (bit-for-bit) |
+| Qwen3.6-35B-A3B Q8_0 | 12 / 12 | against llama.cpp: KL 3.8e-3 |
+| DeepSeek-V4.1-Flash 2.00 bpw | 12 / 12 | against `tools/dsv41/ref_gguf.py` (an independent PyTorch forward on the CPU, 428 tokens of prose and code): 96.7 % top-1, mean KL 0.008, perplexity 6.54 vs the reference's 6.58 |
+
+The functional checks are instruction following (JSON and exact text), retrieval from 4K and 16K prompts, and tool
+calls ([BENCHMARK_PROTOCOL.md](BENCHMARK_PROTOCOL.md)). The benchmark's speeds at 4K / 16K prompts: Qwen3.6 Q8_0
+reads 1,073 / 899 tok/s and decodes 84 / 47 tok/s; Qwen3.8 IQ3_XXS reads 475 / 661 and decodes 78 / 72; DeepSeek reads
+only 19 / 36 tok/s (a 3,000-token prompt waits about 2.5 minutes for its first token) and decodes 28 at every length.
+
+To repeat the DeepSeek check (the reference needs `torch` (CPU) and llama.cpp's `gguf-py`; one pass of 428 tokens took
+72 minutes and ~35 GB of RAM):
+
+```bash
+strata-dsv41 --pack PACK --gpus 0,1 --ids @text.ids --n 1 --max-context 8192 --dspark none --dump-logits engine.f32
+python tools/dsv41/ref_gguf.py --pack PACK --ids "$(cat text.ids)" --dump ref.npz --no-hs --dev cpu
+python tools/dsv41/compare.py --ref ref.npz --engine engine.f32
+```
+
 ## Where the time goes, and what's left
 
 - **Qwen3.8:** at `auto` clocks each die is busy ~70–77 % of a window; the rest is the cross-die and host round trip and the
