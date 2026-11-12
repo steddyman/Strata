@@ -1005,6 +1005,32 @@ __global__ void __launch_bounds__(256) g906_q5k_mv_kernel(const Jobs J, int rpb)
     int8_t* xs = (int8_t*) g906_sm;                       // NC k int8
     float* xds = (float*) (xs + (size_t) NC * k);          // NC nsb scales
     int* hs = (int*) (xds + (size_t) NC * nsb);           // NC nsb x 2 half sums
+    if (b.xf != nullptr) {
+        // one column's F32 activations rounded here (g906_q5k_fuse_ok: k a multiple of 1024, so every lane runs every
+        // step): a thread four values, the 32-value sub-block's largest magnitude over its 8 lanes, q8_quant's
+        // sc = am / 127 and rint(v / sc), each 16-value half's integer sum over its 4 lanes - the bytes, scales and
+        // sums the rounding launch and the staging below give
+        typedef float g906_f4a __attribute__((ext_vector_type(4), aligned(4)));
+        const g906_f4a* src = (const g906_f4a*) b.xf;
+        for (int i = threadIdx.x; i < k / 4; i += 256) {
+            const g906_f4a v = src[i];
+            float am = fmaxf(fmaxf(fabsf(v[0]), fabsf(v[1])), fmaxf(fabsf(v[2]), fabsf(v[3])));
+            am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 1));
+            am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 2));
+            am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 4));
+            const float sc = am / 127.0f;
+            int q[4];
+#pragma unroll
+            for (int x = 0; x < 4; ++x) q[x] = am > 0.0f ? __float2int_rn(v[x] / sc) : 0;
+            ((int*) xs)[i] = (q[0] & 255) | ((q[1] & 255) << 8) | ((q[2] & 255) << 16) | (int) ((unsigned) q[3] << 24);
+            int s4 = q[0] + q[1] + q[2] + q[3];
+            s4 += __shfl_xor_sync(0xffffffffu, s4, 1);
+            s4 += __shfl_xor_sync(0xffffffffu, s4, 2);
+            const int sb = i >> 3;
+            if ((threadIdx.x & 3) == 0) hs[2 * sb + ((threadIdx.x >> 2) & 1)] = s4;
+            if ((threadIdx.x & 7) == 0) xds[sb] = sc;
+        }
+    } else
     for (int c = 0; c < nc; ++c) {
         const int4* src = (const int4*) (b.xq + (size_t) c * k);
         int4* dst = (int4*) (xs + (size_t) c * k);
@@ -1924,6 +1950,22 @@ void gather_f16(const uint16_t* x, int ldx, const int* idx, int n, int k, uint16
 }
 void swiglu_f16(const float* gu, int ld, int n, int ff, float limit, uint16_t* h, int ldh, cudaStream_t s) {
     strata_ds4_launch(swiglu_f16_kernel, grid_for((long long) n * ff), kThreads, 0, s, gu, ld, n, ff, limit, h, ldh);
+}
+
+bool g906_q5k_fuse_ok(const MvJob* jobs, int n) {
+#if defined(STRATA_HIP_GFX906)
+    static const bool on = [] { const char* e = std::getenv("DS4_G906_Q5K_FQ"); return !(e && e[0] == '0'); }();
+    if (!on || !g906_q5k_on() || n <= 0 || n > kMaxJobs) return false;
+    const int k = jobs[0].k;
+    if (k % 1024 != 0 || k > 8192) return false;
+    for (int j = 0; j < n; ++j)
+        if (jobs[j].type != kQ5_K || jobs[j].ncol != 1 || jobs[j].k != k || jobs[j].ld != (size_t) (k / 256) * Ty<kQ5_K>::B)
+            return false;
+    return true;
+#else
+    (void) jobs, (void) n;
+    return false;
+#endif
 }
 
 bool mv(const MvJob* jobs, int n, cudaStream_t s) {

@@ -2470,7 +2470,9 @@ void hc_mix_split_norm(const float* h, const float* fn, int hcdim, int n_mix, in
                        float* comb, const float* nmix, const float* nw, float* nx, cudaStream_t s) {
 #if defined(STRATA_HIP_GFX906)
     static const bool g906 = [] { const char* e = std::getenv("DS4_G906_HCMIX"); return !(e && e[0] == '0'); }();
-    static const bool fuse = [] { const char* e = std::getenv("DS4_G906_HCNORM"); return !(e && e[0] == '0'); }();
+    // (opt-in, DS4_G906_HCNORM=1: bit-identical but slower - its one block of 256 threads reads the 80 KB the 1024-thread
+    //  launch read, and the mix launch ends later: 31.1 -> 30.3 tok/s on the Mac Pro 2019, 2 runs a side)
+    static const bool fuse = [] { const char* e = std::getenv("DS4_G906_HCNORM"); return e != nullptr && e[0] == '1'; }();
     const int dim = hcdim / hc;
     if (g906 && fuse && n_mix <= 32 && T <= kWin && hcdim % (kHcS * 4) == 0 && hc <= 8 && dim <= 8192 && nmix != pre) {
         strata_ds4_launch(hc_mix_split_norm_g906_kernel, dim3(n_mix * kHcS + 1, T), kThreads, 0, s, h, fn, hcdim, eps, mixes, cnt, scale,

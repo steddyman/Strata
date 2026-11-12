@@ -1331,6 +1331,12 @@ bool mv(const x3::MvJob* jobs, int n, cudaStream_t s) {
             vec[f] = vec[f] && xa && (f != 0 || (m.k % 8 == 0 && b.ld % 8 == 0 && ((uintptr_t) b.w & 15u) == 0));
         }
     }
+#if defined(STRATA_HIP_GFX906)
+    if (nij == n && iq::g906_q5k_fuse_ok(IJ, nij)) {   // every job of the call: its GEMV kernel rounds the activations (no rounding launch)
+        for (int i = 0; i < nij; ++i) IJ[i].xf = jobs[i].xf;
+        QI.n = 0;
+    }
+#endif
     quant_flush(QI, s);
     for (int f = 0; f < 3; ++f) mv_set(f, J[f], nj[f], max_n[f], max_c[f], vec[f], s);
 #if defined(STRATA_METAL)
