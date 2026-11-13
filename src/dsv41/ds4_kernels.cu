@@ -1798,7 +1798,33 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     }
     __syncthreads();
     const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-    for (int r = 0; r < k; ++r) {
+#if defined(STRATA_HIP_GFX906)
+    // gfx906: the k picks in one pass - a score's rank is the number of scores above it (an equal one at a lower index
+    // counts), and rank r < k is pick r: the rounds' picks in the rounds' order, without their 2 k barriers (a round
+    // cost ~3 us of the kernel's 27).  A score the rounds would never take (not above -FLT_MAX: a non-finite gate
+    // input) sends the block through the rounds below, so that case stays theirs.
+    __shared__ int odd;
+    if (threadIdx.x == 0) odd = 0;
+    __syncthreads();
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        const float v = bs[i];
+        if (!(v > -FLT_MAX)) {
+            odd = 1;
+            continue;
+        }
+        int rank = 0;
+        for (int j = 0; j < n; ++j) {
+            const float u = bs[j];
+            rank += (u > v || (u == v && j < i)) ? 1 : 0;
+        }
+        if (rank < k) pick[rank] = i;
+    }
+    __syncthreads();
+    const bool rounds = odd != 0;
+#else
+    const bool rounds = true;
+#endif
+    for (int r = 0; rounds && r < k; ++r) {
         float best = -FLT_MAX;
         int bix = 0x7fffffff;
         for (int i = threadIdx.x; i < n; i += blockDim.x)
