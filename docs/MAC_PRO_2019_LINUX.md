@@ -120,12 +120,14 @@ not measured end to end. How it was done: [GFX906_KERNEL_PLAN.md](GFX906_KERNEL_
 
 Decode, drafting **Off**, 256 tokens after a prompt of each length (engine 0.1.59.21, 128K context allowed):
 
-| Prompt | Decode | Before (0.1.59.20) | Prompt speed |
-| --- | ---: | ---: | ---: |
-| 24 tokens | **31.4 tok/s** | 28.0 (8–20 in about 4 runs of 10) | |
-| 3.8K tokens | **31.4 tok/s** | | 139 tok/s |
-| 13.9K tokens | **33.7 tok/s** | 25.2 | 155 tok/s |
-| 97K tokens | **29.3 tok/s** | 23.5 | 156 tok/s |
+| Prompt | Decode | Before (0.1.59.20) | Prompt speed | Before |
+| --- | ---: | ---: | ---: | ---: |
+| 24 tokens | **31.9 tok/s** | 28.0 (8–20 in about 4 runs of 10) | | |
+| 3.8K tokens | **31.8 tok/s** | | **184 tok/s** | 143 |
+| 13.9K tokens | **34.4 tok/s** | 25.2 | **294 tok/s** | 159 |
+| 97K tokens | **29.8 tok/s** | 23.5 | **370 tok/s** (4.4 min) | 156 (10.4 min) |
+
+The prompt speeds are for a prompt read in one piece, as the server reads it, and include the settle after it.
 
 Earlier engines: 0.1.59.18 read prompts at 22 / ~36 tok/s (3.8K / 13.9K); the first gfx906 run (layer split) decoded at
 19–21 tok/s.
@@ -143,11 +145,18 @@ What 0.1.59.21 changed, in the order it mattered:
   holds 1024. Now 5,955 of 15,360 experts a die (was 5,355) (`DS4_TP_TIGHT=0` restores the old layout).
 - **The split-KV decode attention** (`ds4_attn_split.cuh`, opt-in elsewhere): the decode's attention 31.9 → 26.7 ms a
   token over both dies after a 13.9K prompt (`DS4_ATTN_SPLIT=0` turns it off).
+- **Fewer launches a token, bit-identical:** the Q5_K GEMV rounds its own activations when every job of a call is one
+  (31.1 → 31.9 tok/s, `DS4_G906_Q5K_FQ=0`), and the router picks its 6 experts in one pass. Putting the pre-norm into
+  the hyper-connection mix launch measured slower (30.3), so that one is opt-in (`DS4_G906_HCNORM=1`).
+- **Long prompts skip layers 20–39 for all but their last 2,668 rows**, as on one GPU (`DS4_YOCO_TP=0` turns it off): the
+  same tokens after a 13.9K prompt, read at 216 tok/s instead of 155.
+- **The prompt's expert kernels in F16** by `v_dot2_f32_f16` (`DS4_G906_SET16=0`: the F32 kernel): 4.3 → 8.1 TFLOPS, their
+  time on a 13.9K prompt 41.3 → 17.8 s.
 
 - **Prompts:** up to 0.1.59.18 each die's share of every streamed expert's down matrix crossed PCIe as 4,096 short rows,
   a copy that runs at 0.05 GB/s on gfx906, so a 3,000-token prompt waited ~2.5 minutes. 0.1.59.19 copies the whole
-  matrix (13 GB/s) and cuts the share out on the GPU (`DS4_DOWN_BOUNCE=0` restores the old copy). What's left is mostly
-  the FP32 expert kernels (~40 % of a die's time), the two dies waiting on each other at each layer's sum, and attention.
+  matrix (13 GB/s) and cuts the share out on the GPU (`DS4_DOWN_BOUNCE=0` restores the old copy). After 0.1.59.21 a
+  13.9K prompt's GPU time is experts 71 % (with the waits for streamed ones), attention 23 %, the shared expert 5 %.
 
 - About 51 GB of the 132 GB of experts sit in VRAM (39 % of them); the rest run on the Xeon's AVX-512 (a Cascade Lake build of the i-quant
   kernels, since the W-3245 lacks VBMI / VPOPCNTDQ). The Engram table is read from the SSD. This is why it needs the 192 GB.
@@ -176,7 +185,9 @@ The functional checks are instruction following (JSON and exact text), retrieval
 calls ([BENCHMARK_PROTOCOL.md](BENCHMARK_PROTOCOL.md)). The benchmark's speeds at 4K / 16K prompts: Qwen3.6 Q8_0
 reads 1,073 / 899 tok/s and decodes 84 / 47 tok/s (engine 0.1.59.18; 0.1.59.20 decodes ~92 after the 16K prompt); Qwen3.8 IQ3_XXS reads 475 / 661 and decodes 78 / 72; DeepSeek read
 only 19 / 36 tok/s on engine 0.1.59.18 (a 3,000-token prompt waited about 2.5 minutes for its first token; 143 / 159 tok/s
-since 0.1.59.19, see above) and decodes 28 at every length.
+since 0.1.59.19, see above) and decodes 28 at every length. Engine 0.1.59.21, the same benchmark on 13 November 2026
+(12 / 12 again, the prompts read, not restored from saved conversations): prompts 193 / 316 tok/s, decode 32 / 32 tok/s,
+first token after 15 s / 38 s (it was 157 s / 337 s), the whole benchmark 8 min 38 s.
 
 To repeat the DeepSeek check (the reference needs `torch` (CPU) and llama.cpp's `gguf-py`; one pass of 428 tokens took
 72 minutes and ~35 GB of RAM):
