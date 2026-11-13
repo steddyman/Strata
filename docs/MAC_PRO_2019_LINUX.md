@@ -15,6 +15,10 @@ app (AppImage). It was built and measured on one machine, and the defaults are t
 Other gfx906 cards (Instinct MI50 / MI60, Radeon VII, Radeon Pro VII) use the same kernels, but none of the numbers below
 were measured on them. A smaller GPU or less RAM changes what fits: DeepSeek in particular needs the 192 GB.
 
+![Decode and prompt speed of the three models on the Mac Pro 2019](media/mac-pro-2019/overview.png)
+
+The cards on this page sum up the tables below; the tables say which engine and settings each number comes from.
+
 ## Before you start: let the GPUs clock up
 
 **This is the most important setting on this machine.** The amdgpu driver has a power level per card,
@@ -86,6 +90,11 @@ Decode is greedy generation on a single request at the stated context; prompt is
 
 ### Qwen3.8-Flash-Next (both dies, layer split, MTP drafting)
 
+![Qwen3.8-Flash-Next on the Mac Pro 2019: about 83 tok/s decode with the IQ3_XXS pack](media/mac-pro-2019/qwen38.png)
+
+The prompt speeds on the card (474 tok/s at 4K tokens, 660 at 16K, IQ3_XXS) were read from the app's log on engine
+0.1.59.18, two runs at each length.
+
 | Pack | Decode | Engine |
 | --- | ---: | --- |
 | ISTA-DASLab IQ3_XXS | **~83 tok/s** | 0.1.59.15 |
@@ -98,6 +107,8 @@ about 60 tok/s in the app, because fewer drafted tokens are accepted. Q2_0 and I
 not measured end to end. How it was done: [GFX906_KERNEL_PLAN.md](GFX906_KERNEL_PLAN.md).
 
 ### Qwen3.6-35B-A3B (128K context)
+
+![Qwen3.6-35B-A3B on the Mac Pro 2019: 107-160 tok/s decode with Q8_0 on both dies](media/mac-pro-2019/qwen36.png)
 
 | | Q4 (UD-Q4_K_XL), one die | Q4, both dies | Q8_0, both dies |
 | --- | ---: | ---: | ---: |
@@ -117,6 +128,8 @@ not measured end to end. How it was done: [GFX906_KERNEL_PLAN.md](GFX906_KERNEL_
 - Details: [QWEN36.md](QWEN36.md#gfx906-vega-20-radeon-pro-vii-mi50-vega-ii).
 
 ### DeepSeek-V4.1-Flash (both dies, tensor parallel, ISTA-DAS 2.00 bpw general set)
+
+![DeepSeek-V4.1-Flash IST-DAS-2.00bpw on the Mac Pro 2019: 32-34 tok/s decode](media/mac-pro-2019/deepseek41.png)
 
 Decode, drafting **Off**, 256 tokens after a prompt of each length (engine 0.1.59.21, 128K context allowed):
 
