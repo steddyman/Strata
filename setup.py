@@ -9582,8 +9582,11 @@ def install_dsv41(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopted, 
     step(4, "the DeepSeek engine")
     eng, meta, lib_dirs = ROOT / "engine", {"version": None}, []
     exe = dsv41_exe(eng)
-    if exe is None and hip and not getattr(a, "dsv41_package", None):
-        # a gfx906 engine package carries strata-dsv41 inside it and the feed has none of its own: taken from the installed engine (no download)
+    from strata_control import dsv41_engine as _ds
+    if (hip and not getattr(a, "dsv41_package", None)
+            and (exe is None or (exe.parent.parent == dsv41_engine_dir(eng) and exe.parent.name.endswith(tuple("-" + v for v in _ds.BUNDLED_VARIANTS))))):
+        # a gfx906 engine package carries strata-dsv41 inside it and the feed has none of its own: taken from the installed engine (no download),
+        # also when an older one is here already (a newer bundled engine brings a newer DeepSeek engine; a package chosen in Settings stays)
         from strata_control import dsv41_engine
         if dsv41_engine.from_engine_store(dsv41_engine_dir(eng), emit=lambda m: say("  " + m)) is not None:
             exe = dsv41_exe(eng)

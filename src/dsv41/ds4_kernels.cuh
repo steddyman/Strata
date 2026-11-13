@@ -66,6 +66,11 @@ void hc_mix(const float* h, const float* fn, int hcdim, int n_mix, int T, float 
 void hc_mix_split(const float* h, const float* fn, int hcdim, int n_mix, int T, float eps, float* mixes, unsigned* cnt,
                   const float* scale, const float* base, int hc, int iters, float hc_eps, float* pre, float* post,
                   float* comb, cudaStream_t s);
+/// hc_mix_split, then hc_pre_norm(h, nmix, nw, hcdim / hc, hc, T, eps, nx) - nmix a mix written before this call, not
+/// this call's pre.  On gfx906 one launch (the norm a block of its own, hc_pre_norm_kernel's arithmetic to the bit).
+void hc_mix_split_norm(const float* h, const float* fn, int hcdim, int n_mix, int T, float eps, float* mixes, unsigned* cnt,
+                       const float* scale, const float* base, int hc, int iters, float hc_eps, float* pre, float* post,
+                       float* comb, const float* nmix, const float* nw, float* nx, cudaStream_t s);
 void hc_split(const float* mixes, const float* scale, const float* base, int hc, int iters, float hc_eps, int T,
               float* pre, float* post, float* comb, cudaStream_t s);
 /// the same two in one dispatch (the Metal kernel ds4_hc_mix_split); the CUDA path calls hc_mix then hc_split.

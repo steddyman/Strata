@@ -567,6 +567,13 @@ def _repair_dsv41_paths(name: str) -> None:
         profile, _ = profiles.load(name)
         configs = [Path(profile["source_config"]), *[c for c in dsv41_paths.saved_configs() if c != Path(profile["source_config"])]]
         notes = dsv41_paths.repair_missing(configs)
+        # a gfx906 engine package carries strata-dsv41 inside it and there is no DeepSeek package of its own in the feed: a newer one in the
+        # installed engine (the app's bundled engine, an engine update) is taken here, or DeepSeek would stay on the first one for ever
+        from strata_control import dsv41_engine
+        for root in dsv41_paths.roots_of(configs):
+            new = dsv41_engine.from_engine_store(root, emit=lambda m: None)
+            if new is not None and dsv41_engine.find(root) == new and dsv41_paths.repoint_older(configs, new):
+                notes.append(f"DeepSeek now runs the engine {new.parent.name.split('-')[0]} that came with the installed Strata engine.")
         if notes:
             _, _, log_path = _paths(name)
             if log_path.parent.is_dir():

@@ -177,6 +177,21 @@ bool tp_uneven() {
     }();
     return on;
 }
+// an uneven split's members each lay their part of an expert out for their own share, not all for the widest share
+// (DS4_TP_TIGHT=1 / 0; on by default on gfx906): of n_ff 2304 in shares of 1280 + 1024 the narrow member's slot is
+// 1024 wide, not 1280 - a tenth more experts in the same VRAM
+bool tp_tight() {
+    static const bool on = [] {
+        const char* e = std::getenv("DS4_TP_TIGHT");
+        if (e != nullptr) return e[0] == '1';
+#if defined(STRATA_HIP_GFX906)
+        return true;
+#else
+        return false;
+#endif
+    }();
+    return on;
+}
 
 std::string read_file(const std::string& p) {
     std::ifstream f(p);
@@ -1389,7 +1404,16 @@ struct Model::Impl {
     static float env_f(const char* k, float d) { return std::getenv(k) ? (float) std::atof(std::getenv(k)) : d; }
     const float c_margin = env_f("DS4_CACHE_MARGIN", 1.25f), c_bonus = env_f("DS4_CACHE_BONUS", 1.0f),
                 c_decay = env_f("DS4_CACHE_DECAY", 0.9f);
-    const int c_inflight = std::max(1, (int) env_f("DS4_CACHE_INFLIGHT", (float) kMaxSwaps));
+    // gfx906 (two Vega 20 dies, ~35 % of the experts in VRAM, the rest on the CPU lane): 32 swaps under way on 4 threads,
+    // and a settle after the prompt that grows with it (cache_settle).  Measured on the Mac Pro 2019, ISTA-DAS 2.00, a
+    // 13.9K-token prompt then 256 tokens: 25.2 -> 30.2 tok/s (the CPU lane 10441 -> 5771 of 61200 experts), the prompt
+    // 87.2 -> 91.2 s; the swap threads alone (the old 800 ms settle) 26.8 tok/s
+#if defined(STRATA_HIP_GFX906)
+    static constexpr int kInflightDefault = 32, kCacheThreadsDefault = 4;
+#else
+    static constexpr int kInflightDefault = kMaxSwaps, kCacheThreadsDefault = 1;
+#endif
+    const int c_inflight = std::max(1, (int) env_f("DS4_CACHE_INFLIGHT", (float) kInflightDefault));
     // the RAM tier (a GGUF's in-place experts, as GLM's: the hottest in VRAM, the next hottest here, the coldest in the
     // files): RAM slots of one expert blob each, filled at load with the hottest experts VRAM does not hold, so the
     // CPU lane reads them from RAM; between windows (cache_tick) a hotter expert from the files takes the place of the
@@ -2024,6 +2048,14 @@ struct Model::Impl {
     static const Layer& member(const Layer& l, int m) { return m == 0 ? l : l.mates[(size_t) m - 1]; }
     // bytes of a VRAM slot of l's experts (a member's part of each, in a group)
     static size_t unit(const Layer& l) { return l.nm > 1 ? l.hblob : l.blob; }
+    // layer l's member on device d (its own part's layout and slot size; l itself when the device holds none)
+    const Layer& on_dev(const Layer& l, const Dev& d) const {
+        const Layer& root = L[(size_t) l.il];
+        const int di = (int) (&d - &devs[0]);
+        for (int m = 0; m < root.nm; ++m)
+            if (member(root, m).dev == di) return member(root, m);
+        return l;
+    }
     // v1.1.18's prompt-path changes (the borrowed room and its chunk default, a short run's reads through the page cache,
     // the decode warm-up) by default on one GPU, where they were measured; on more as in v1.1.17 unless setting k
     // asks (1 on, 0 off)
@@ -2589,9 +2621,9 @@ struct Model::Impl {
         const size_t gr = gg::type_row_bytes(gg::expert_type(l.lay, 0), g.dim), dr = gg::type_row_bytes(t2, g.ff),
                      dh = gg::type_row_bytes(t2, x.ffn), d0 = gg::type_row_bytes(t2, x.ff0);
         for (int r = 0; r < 2; ++r)
-            std::memcpy(dst + l.hlay.trellis[r], blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, (size_t) x.ffn * gr);
+            std::memcpy(dst + x.hlay.trellis[r], blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, (size_t) x.ffn * gr);
         for (size_t row = 0; row < (size_t) g.dim; ++row)
-            std::memcpy(dst + l.hlay.trellis[2] + row * dh, blob + l.lay.trellis[2] + row * dr + d0, dh);
+            std::memcpy(dst + x.hlay.trellis[2] + row * dh, blob + l.lay.trellis[2] + row * dr + d0, dh);
     }
     void mx_half_to_blob(const Layer& l, const uint8_t* src, int m, uint8_t* blob) const {
         const Layer& x = member(l, m);
@@ -2599,9 +2631,9 @@ struct Model::Impl {
         const size_t gr = gg::type_row_bytes(gg::expert_type(l.lay, 0), g.dim), dr = gg::type_row_bytes(t2, g.ff),
                      dh = gg::type_row_bytes(t2, x.ffn), d0 = gg::type_row_bytes(t2, x.ff0);
         for (int r = 0; r < 2; ++r)
-            std::memcpy(blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, src + l.hlay.trellis[r], (size_t) x.ffn * gr);
+            std::memcpy(blob + l.lay.trellis[r] + (size_t) x.ff0 * gr, src + x.hlay.trellis[r], (size_t) x.ffn * gr);
         for (size_t row = 0; row < (size_t) g.dim; ++row)
-            std::memcpy(blob + l.lay.trellis[2] + row * dr + d0, src + l.hlay.trellis[2] + row * dh, dh);
+            std::memcpy(blob + l.lay.trellis[2] + row * dr + d0, src + x.hlay.trellis[2] + row * dh, dh);
     }
 
     bool expert_layout(Layer& l, std::string& err) {
@@ -3210,7 +3242,9 @@ struct Model::Impl {
                     split128(g.ff, l.nm, m, x.ff0, x.ffn, l.il % l.nm);   // (rot: the odd blocks go round the members)
                 size_t off = 0;
                 for (int r = 0; r < 3; ++r) {
-                    const int fw = gguf_x ? ff_max : x.ffn;   // (a GGUF's layout: the widest share's, the same for every member)
+                    // (a GGUF's layout: the widest share's, the same for every member - or, tp_tight, the member's own
+                    // share's: an uneven split's narrow member then keeps no room for rows and blocks it does not hold)
+                    const int fw = gguf_x && !tp_tight() ? ff_max : x.ffn;
                     const int k = r < 2 ? g.dim : fw, n = r < 2 ? fw : g.dim;
                     x.hlay.K[r] = l.lay.K[r];
                     x.hlay.K[r] = l.lay.K[r];
@@ -3833,7 +3867,7 @@ struct Model::Impl {
         if (o.expert_cache) {
             size_t maxb = 0;
             for (const Layer& l : L) maxb = std::max(maxb, l.blob);
-            const int nt = std::max(1, std::min(c_inflight, std::getenv("DS4_CACHE_THREADS") ? std::atoi(std::getenv("DS4_CACHE_THREADS")) : 1));
+            const int nt = std::max(1, std::min(c_inflight, std::getenv("DS4_CACHE_THREADS") ? std::atoi(std::getenv("DS4_CACHE_THREADS")) : kCacheThreadsDefault));
             sw_bufs.resize((size_t) nt);
             for (SwapBufs& B : sw_bufs) {
                 if (!halloc(B.a, maxb, err) || !halloc(B.b, maxb, err) || !halloc(B.h, maxb, err)) return false;
@@ -4432,9 +4466,9 @@ struct Model::Impl {
                 const size_t gr = gg::type_row_bytes(gg::expert_type(l.lay, 0), g.dim), dr = gg::type_row_bytes(t2, g.ff),
                              dh = gg::type_row_bytes(t2, x.ffn), d0 = gg::type_row_bytes(t2, x.ff0);
                 for (int r = 0; r < 2; ++r)
-                    ok = ok && cudaMemcpyAsync(dst + l.hlay.trellis[r], mat_r(r) + (size_t) x.ff0 * gr,
+                    ok = ok && cudaMemcpyAsync(dst + x.hlay.trellis[r], mat_r(r) + (size_t) x.ff0 * gr,
                                                (size_t) x.ffn * gr, cudaMemcpyHostToDevice, cs) == cudaSuccess;
-                ok = ok && copy_down_part(dst + l.hlay.trellis[2], mat_r(2), dr, dh, d0, bounce, bounce_bytes, cs);
+                ok = ok && copy_down_part(dst + x.hlay.trellis[2], mat_r(2), dr, dh, d0, bounce, bounce_bytes, cs);
             }
             if (!ok) err = "streaming layer " + std::to_string(l.il) + " expert " + std::to_string(e) + " failed";
             return ok;
@@ -4972,7 +5006,7 @@ struct Model::Impl {
             if (c.n_dma >= R) CK(cudaStreamWaitEvent(c.cs, c.ring_free[r], 0));
             const Layer& l = L[(size_t) it.il];
             uint8_t* dst = c.ring + r * c.ring_stride;
-            const x3::ExpertLayout& lay = l.nm > 1 ? l.hlay : l.lay;
+            const x3::ExpertLayout& lay = l.nm > 1 ? member(l, it.mi).hlay : l.lay;
             if (it.direct) {   // (already in the slot)
                 CK(cudaEventRecord(c.ring_fill[r], c.cs));
                 c.stream_bytes += (double) unit(l);
@@ -5082,7 +5116,7 @@ struct Model::Impl {
                 x3::SetArgs sa;
                 sa.wbase = wbase + (size_t) (i0 - wb0) * stride;   // (wbase: set member wb0's blob)
                 sa.stride = stride;
-                sa.lay = l.nm > 1 ? l.hlay : l.lay;
+                sa.lay = l.nm > 1 ? on_dev(l, d).hlay : l.lay;   // (this device's member's)
                 sa.n_exp = j - i0;
                 sa.bounds = d_bounds + i0;
                 sa.row0 = a;
@@ -5821,8 +5855,8 @@ struct Model::Impl {
                         const Layer& x = member(l, m);
                         cudaSetDevice(devs[(size_t) x.dev].id);
                         if (l.nm > 1) blob_to_half(l, stage, m, stage2);
-                        ok = cudaMemcpy(sat(l, x, l.slot[(size_t) e], unit(l)), l.nm > 1 ? stage2 : stage,
-                                        unit(l), cudaMemcpyHostToDevice) == cudaSuccess;
+                        ok = cudaMemcpy(sat(l, x, l.slot[(size_t) e], unit(x)), l.nm > 1 ? stage2 : stage,
+                                        unit(x), cudaMemcpyHostToDevice) == cudaSuccess;
                     }
                     if (!ok) {
                         std::lock_guard<std::mutex> lk(emu);
@@ -8744,7 +8778,7 @@ struct Model::Impl {
             cudaSetDevice(devs[(size_t) x.dev].id);
             cudaStream_t cs = copy_st[(size_t) x.dev];
             if (l.nm > 1) blob_to_half(l, sw_a, m, sw_h);
-            ok = cudaMemcpyAsync(sat(l, x, l.spare_vram, unit(l)), l.nm > 1 ? sw_h : sw_a, unit(l),
+            ok = cudaMemcpyAsync(sat(l, x, l.spare_vram, unit(x)), l.nm > 1 ? sw_h : sw_a, unit(x),
                                  cudaMemcpyHostToDevice, cs) == cudaSuccess &&
                  cudaStreamSynchronize(cs) == cudaSuccess;
         }
@@ -8754,8 +8788,8 @@ struct Model::Impl {
                 const Layer& x = member(l, m);
                 cudaSetDevice(devs[(size_t) x.dev].id);
                 cudaStream_t cs = copy_st[(size_t) x.dev];
-                got = cudaMemcpyAsync(l.nm > 1 ? sw_h : sw_b, sat(l, x, l.slot[(size_t) sw.out], unit(l)),
-                                      unit(l), cudaMemcpyDeviceToHost, cs) == cudaSuccess &&
+                got = cudaMemcpyAsync(l.nm > 1 ? sw_h : sw_b, sat(l, x, l.slot[(size_t) sw.out], unit(x)),
+                                      unit(x), cudaMemcpyDeviceToHost, cs) == cudaSuccess &&
                       cudaStreamSynchronize(cs) == cudaSuccess;
                 if (got && l.nm > 1) half_to_blob(l, sw_h, m, sw_b);
             }
@@ -8777,11 +8811,11 @@ struct Model::Impl {
             }
         }
         if (check_swaps) {   // DS4_CHECK_SWAPS: the slot (and `out`'s RAM copy) against the model file, byte for byte
-            std::vector<uint8_t> dev(l.blob), h(unit(l)), file(l.blob);
+            std::vector<uint8_t> dev(l.blob), h(l.blob), file(l.blob);   // (h: any member's part)
             for (int m = 0; m < l.nm && ok; ++m) {
                 const Layer& x = member(l, m);
                 cudaSetDevice(devs[(size_t) x.dev].id);
-                cudaMemcpy(l.nm > 1 ? h.data() : dev.data(), sat(l, x, l.spare_vram, unit(l)), unit(l),
+                cudaMemcpy(l.nm > 1 ? h.data() : dev.data(), sat(l, x, l.spare_vram, unit(x)), unit(x),
                            cudaMemcpyDeviceToHost);
                 if (l.nm > 1) half_to_blob(l, h.data(), m, dev.data());
             }
@@ -8811,9 +8845,17 @@ struct Model::Impl {
     // What the swaps buy is decode: about 10% on a 256-token answer, i.e. 6.2 s of prompt against 1.6 s of decode on that
     // answer and nothing at all on a 50-300-token tool-call answer.  800 ms keeps the hottest of them and gives the prompt
     // back about 5 s (the plan's own table: prompt + 256 tokens, 27.2 s at 6,000 ms, 23.9 s at 800, 23.4 s at 0).
-    void cache_settle() {
+    // gfx906: the budget grows with the prompt - about 7 % of its time (0.5 ms a token at ~150 tok/s), 800 ms at least
+    // and 5,000 ms at most - because there the CPU lane is what a decode token waits for (see kInflightDefault)
+    void cache_settle(int took = 0) {
         if (!o.expert_cache || cache_ths.empty()) return;
-        static const double budget = env_f("DS4_SETTLE_MS", 800.0f);
+        static const double budget_env = env_f("DS4_SETTLE_MS", -1.0f);
+        double budget = budget_env >= 0.0 ? budget_env : 800.0;
+#if defined(STRATA_HIP_GFX906)
+        if (budget_env < 0.0) budget = std::min(5000.0, std::max(800.0, 0.5 * (double) took));
+#else
+        (void) took;
+#endif
         if (budget <= 0.0) return;
         const double t0 = now_ms();
         const int64_t s0 = st.swaps;
@@ -12988,9 +13030,20 @@ struct Model::Impl {
         for (int il = 0; il < g.nl && yl < 0; ++il)
             if (g.ratios[(size_t) il] == 1) yl = il;
         if (yl <= 0 || !L[(size_t) yl].kv_src) return -1;
+        // one GPU - or (DS4_YOCO_TP=1; on by default on gfx906) one tensor-parallel group that holds every layer: its
+        // members run each chunk of each layer together, so the skip is the same rows left out on each of them
+        static const bool tp_ok = [] {
+            const char* e = std::getenv("DS4_YOCO_TP");
+            if (e != nullptr) return e[0] == '1';
+#if defined(STRATA_HIP_GFX906)
+            return true;
+#else
+            return false;
+#endif
+        }();
         for (int il = 0; il < g.nl; ++il) {
             const Layer& l = L[(size_t) il];
-            if (l.nm != 1 || l.dev != L[0].dev) return -1;
+            if (l.dev != L[0].dev || l.grp != L[0].grp || l.nm != L[0].nm || (l.nm != 1 && !tp_ok)) return -1;
             if (il > yl && (g.ratios[(size_t) il] != 1 || l.kv_src)) return -1;
         }
         return yl;
@@ -13286,7 +13339,7 @@ struct Model::Impl {
             lm_end();
             lm_end_.on = false;
         }
-        cache_settle();
+        cache_settle(took);
         warm_after(took);
         // (the drafter seeded from the run's last rows - when they went through every layer: not after a yield)
         const int nr = std::min({T_last, tap_cap, a > 0 ? n - a : n});   // (the rows that went through every layer)
@@ -14145,14 +14198,17 @@ struct Model::Impl {
         hc_mix_split(d.h, l.hca_fn, H * D, (2 + H) * H, T, g.eps, d.mix, l.hca_scale, l.hca_base, H,
                      g.sinkhorn, g.hc_eps, d.a_pre, d.a_post, d.a_comb, s);
 #else
-        hc_mix_split(d.h, l.hca_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hca_scale, l.hca_base, H, g.sinkhorn, g.hc_eps,
-                     d.a_pre, d.a_post, d.a_comb, s);
+        // (with the pre-norm below, which reads h and the previous layer's pre: one launch on gfx906)
+        hc_mix_split_norm(d.h, l.hca_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hca_scale, l.hca_base, H, g.sinkhorn, g.hc_eps,
+                          d.a_pre, d.a_post, d.a_comb, d.pre, l.attn_norm, d.x, s);
 #endif
         dump_sub(d, "a_mix", l.il, p0, T, d.mix, (size_t) T * 32 * 4);
         dump_sub(d, "a_pre", l.il, p0, T, d.a_pre, (size_t) T * 8 * 4);
         dump_sub(d, "a_post", l.il, p0, T, d.a_post, (size_t) T * 8 * 4);
         dump_sub(d, "a_comb", l.il, p0, T, d.a_comb, (size_t) T * 64 * 4);
+#if defined(STRATA_METAL)
         hc_pre_norm(d.h, d.pre, l.attn_norm, D, H, T, g.eps, d.x, s);
+#endif
         dump_sub(d, "pre_in", l.il, p0, T, d.pre, (size_t) T * 8 * 4);
         dump_sub(d, "attn_x", l.il, p0, T, d.x, (size_t) T * D * 4);
         {
@@ -14218,10 +14274,12 @@ struct Model::Impl {
         hc_mix_split(d.h, l.hcf_fn, H * D, (2 + H) * H, T, g.eps, d.mix, l.hcf_scale, l.hcf_base, H,
                      g.sinkhorn, g.hc_eps, d.f_pre, d.f_post, d.f_comb, s);
 #else
-        hc_mix_split(d.h, l.hcf_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hcf_scale, l.hcf_base, H, g.sinkhorn, g.hc_eps,
-                     d.f_pre, d.f_post, d.f_comb, s);
+        hc_mix_split_norm(d.h, l.hcf_fn, H * D, (2 + H) * H, T, g.eps, d.mix, d.hccnt, l.hcf_scale, l.hcf_base, H, g.sinkhorn, g.hc_eps,
+                          d.f_pre, d.f_post, d.f_comb, d.a_pre, l.ffn_norm, d.x, s);
 #endif
+#if defined(STRATA_METAL)
         hc_pre_norm(d.h, d.a_pre, l.ffn_norm, D, H, T, g.eps, d.x, s);
+#endif
         dump_sub(d, "f_pre", l.il, p0, T, d.f_pre, (size_t) T * 8 * 4);
         dump_sub(d, "f_post", l.il, p0, T, d.f_post, (size_t) T * 8 * 4);
         dump_sub(d, "f_comb", l.il, p0, T, d.f_comb, (size_t) T * 64 * 4);

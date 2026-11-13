@@ -256,11 +256,24 @@ What is different on gfx906:
   `hc_mix_split` in 8 slices (18.5 → 14.6 µs).
 - **CPU lane on Cascade Lake:** the AVX-512 i-quant rows without VBMI / VPOPCNTDQ (Xeon W-3245), checked bit for bit
   against ggml before use: 12.0 → 10.5 ms a token.
+- **Since 0.1.59.21 (gfx906 defaults only, each with its off switch):**
+  - no huge-page request for the RAM copy of the experts (`DS4_ANON_THP`). The request made the kernel compact memory,
+    which moved pages the GPU driver had mapped and froze both dies for seconds at a time (28 → 8–20 tok/s in about
+    4 runs of 10);
+  - 4 swap threads, 32 swaps under way and a settle after the prompt that grows with it (`DS4_CACHE_THREADS`,
+    `DS4_CACHE_INFLIGHT`, `DS4_SETTLE_MS`);
+  - each die's expert slots sized for its own share (`DS4_TP_TIGHT`): 5,955 of 15,360 experts a die in VRAM, was 5,355;
+  - the split-KV decode attention on (`DS4_ATTN_SPLIT`);
+  - the Q5_K GEMV rounds its own activations (`DS4_G906_Q5K_FQ`) and the router picks in one pass, both bit-identical;
+  - a long prompt's skip of layers 20–39 with both dies (`DS4_YOCO_TP`);
+  - the prompt's expert tiles in F16 by `v_dot2_f32_f16` (`DS4_G906_SET16`): 4.3 → 8.1 TFLOPS.
 
 Measured on a Mac Pro 2019 (2x 32 GB Vega 20, Xeon W-3245, 192 GB DDR4-2933, GPU power level `auto`), ISTA-DAS 2.00 bpw
-general set: **~29 tok/s** at 8K context with drafting off, ~20 tok/s at 128K in the app; prompts read at 143 tok/s
-(3.8K tokens) and 159 tok/s (13.9K) since 0.1.59.19, which streams each die's share of an expert's down matrix as the whole
-matrix and cuts it on the GPU (a 2D copy of its short rows ran at 0.05 GB/s on gfx906: 22 tok/s before;
+general set, drafting off, 256 tokens: **31.9 tok/s** after a short prompt (28.0 before 0.1.59.21), **34.4** after a
+13.9K-token prompt (25.2) and **29.8** after a 97K-token prompt (23.5). Prompts read in one piece: **184 tok/s** (3.8K
+tokens), **294** (13.9K) and **370** (97K), against 143 / 159 / 156 on 0.1.59.19–20. 0.1.59.19 was the first to stream
+each die's share of an expert's down matrix as the whole
+matrix and cut it on the GPU (a 2D copy of its short rows ran at 0.05 GB/s on gfx906: 22 tok/s before;
 `DS4_DOWN_BOUNCE=0` restores it). DSpark is slower here (13–21
 tok/s: each drafted token roughly triples the CPU lane's expert work), so set Drafting to **Off**. More, including the clock
 setting: [MAC_PRO_2019_LINUX.md](MAC_PRO_2019_LINUX.md).

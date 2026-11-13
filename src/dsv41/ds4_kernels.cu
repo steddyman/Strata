@@ -436,6 +436,96 @@ __global__ void __launch_bounds__(kThreads) hc_mix_split_g906_kernel(const float
     }
     if (threadIdx.x == 0) cnt[t] = 0u;
 }
+
+// hc_mix_split_g906_kernel with the hc_pre_norm that follows it in a decode layer in one more block of the same launch
+// (block n_mix kHcS of a token).  The norm reads h and a mix an earlier launch wrote (nmix: not this launch's pre), so
+// it needs nothing of the other blocks.  hc_pre_norm_kernel's arithmetic to the bit: its 1024 threads are this block's
+// 256 threads x 4 (virtual thread v = thread + 256 j takes the elements v, v + 1024, ..), their sums of squares go
+// through block_sum's tree (a 32-lane sum a virtual warp, then the 32 warps' sums by warp 0), and each x is the same
+// product.  dim <= 8192 (the mixed rows wait in shared memory).  DS4_G906_HCNORM=0: the two launches.
+__global__ void __launch_bounds__(kThreads) hc_mix_split_norm_g906_kernel(const float* __restrict__ h, const float* __restrict__ fn,
+                                                                          int hcdim, float eps, float* mixes, unsigned* cnt,
+                                                                          const float* __restrict__ scale,
+                                                                          const float* __restrict__ base, int hc, int iters,
+                                                                          float hc_eps, float* pre, float* post, float* comb,
+                                                                          const float* __restrict__ nmix,
+                                                                          const float* __restrict__ nw, float* __restrict__ nx) {
+    const int nb = gridDim.x - 1, t = blockIdx.y;
+    if ((int) blockIdx.x == nb) {   // the norm
+        __shared__ float rs[8192];
+        __shared__ float red[32];
+        __shared__ float total;
+        const int dim = hcdim / hc, lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+        const float* hh = h + (size_t) t * hc * dim;
+        const float* mix = nmix + (size_t) t * 8;
+        float* x = nx + (size_t) t * dim;
+        float ssj[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float ss = 0.0f;
+            for (int e = threadIdx.x + 256 * j; e < dim; e += 1024) {
+                float a = 0.0f;
+                for (int s = 0; s < hc; ++s) a += mix[s] * hh[(size_t) s * dim + e];
+                rs[e] = a;
+                ss += a * a;
+            }
+            ssj[j] = ss;
+        }
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const float v = warp_sum(ssj[j]);
+            if (lane == 0) red[w + 8 * j] = v;
+        }
+        __syncthreads();
+        if (w == 0) {
+            float tt = red[lane];
+            tt = warp_sum(tt);
+            if (lane == 0) total = tt;
+        }
+        __syncthreads();
+        const float inv = rsqrtf(total / (float) dim + eps);
+        for (int e = threadIdx.x; e < dim; e += kThreads) x[e] = nw != nullptr ? rs[e] * inv * nw[e] : rs[e];
+        return;
+    }
+    const int n_mix = nb / kHcS, m = blockIdx.x / kHcS, sl = blockIdx.x % kHcS;
+    float* part = (float*) (cnt + kWin) + (size_t) t * (33 * kHcS);   // [32 mixes][kHcS] dots, then [kHcS] sums of squares
+    const int len = hcdim / kHcS, k0 = sl * len;
+    const float* w = fn + (size_t) m * hcdim + k0;
+    const float* x = h + (size_t) t * hcdim + k0;
+    float acc = 0.0f, ss = 0.0f;
+    for (int k = threadIdx.x * 4; k < len; k += kThreads * 4) {
+        const float4 hv = *(const float4*) (x + k);
+        const float4 wv = *(const float4*) (w + k);
+        acc += hv.x * wv.x + hv.y * wv.y + hv.z * wv.z + hv.w * wv.w;
+        ss += hv.x * hv.x + hv.y * hv.y + hv.z * hv.z + hv.w * hv.w;
+    }
+    acc = block_sum(acc);
+    ss = block_sum(ss);
+    __shared__ unsigned last;
+    __shared__ float smx[32];
+    if (threadIdx.x == 0) {
+        part[m * kHcS + sl] = acc;
+        if (m == 0) part[32 * kHcS + sl] = ss;
+        __threadfence();
+        last = atomicAdd(cnt + t, 1u) == (unsigned) nb - 1u ? 1u : 0u;
+    }
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    if (threadIdx.x < 32) {
+        const volatile float* vp = part;
+        float a = 0.0f, q = 0.0f;
+        for (int j = 0; j < kHcS; ++j) q += vp[32 * kHcS + j];
+        if ((int) threadIdx.x < n_mix)
+            for (int j = 0; j < kHcS; ++j) a += vp[threadIdx.x * kHcS + j];
+        const float mx = a * rsqrtf(q / (float) hcdim + eps);
+        if ((int) threadIdx.x < n_mix) mixes[(size_t) t * 32 + threadIdx.x] = mx;
+        smx[threadIdx.x] = (int) threadIdx.x < n_mix ? mx : 0.0f;
+        __syncwarp();
+        hc_split_body(smx, t, threadIdx.x, scale, base, hc, iters, hc_eps, pre, post, comb);
+    }
+    if (threadIdx.x == 0) cnt[t] = 0u;
+}
 #endif
 
 __global__ void __launch_bounds__(1024) hc_pre_norm_kernel(const float* __restrict__ h, const float* __restrict__ mix,
@@ -1708,7 +1798,33 @@ __global__ void __launch_bounds__(512) route_publish_kernel(const float* __restr
     }
     __syncthreads();
     const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-    for (int r = 0; r < k; ++r) {
+#if defined(STRATA_HIP_GFX906)
+    // gfx906: the k picks in one pass - a score's rank is the number of scores above it (an equal one at a lower index
+    // counts), and rank r < k is pick r: the rounds' picks in the rounds' order, without their 2 k barriers (a round
+    // cost ~3 us of the kernel's 27).  A score the rounds would never take (not above -FLT_MAX: a non-finite gate
+    // input) sends the block through the rounds below, so that case stays theirs.
+    __shared__ int odd;
+    if (threadIdx.x == 0) odd = 0;
+    __syncthreads();
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        const float v = bs[i];
+        if (!(v > -FLT_MAX)) {
+            odd = 1;
+            continue;
+        }
+        int rank = 0;
+        for (int j = 0; j < n; ++j) {
+            const float u = bs[j];
+            rank += (u > v || (u == v && j < i)) ? 1 : 0;
+        }
+        if (rank < k) pick[rank] = i;
+    }
+    __syncthreads();
+    const bool rounds = odd != 0;
+#else
+    const bool rounds = true;
+#endif
+    for (int r = 0; rounds && r < k; ++r) {
         float best = -FLT_MAX;
         int bix = 0x7fffffff;
         for (int i = threadIdx.x; i < n; i += blockDim.x)
@@ -2138,6 +2254,11 @@ constexpr int kSplitG = 4, kSplitR = 40, kSplitCap = 24, kSplitMaxT = 5;
 bool split_enabled() {
     static const bool on = [] {
         const char* e = std::getenv("DS4_ATTN_SPLIT");
+#if defined(STRATA_HIP_GFX906)
+        // on by default on gfx906 (two Vega 20 dies, 32 heads a die): after a 13.9K-token prompt the decode's
+        // attention 31.9 -> 26.7 ms a token over both dies, 30.3 -> 32.1 tok/s (Mac Pro 2019, ISTA-DAS 2.00); =0: off
+        if (e == nullptr) return true;
+#endif
         return e != nullptr && std::atoi(e) != 0;   // opt-in: no gain measured on 4x R9700 (21.8 vs 21.9 tok/s)
     }();
     return on;
@@ -2369,6 +2490,24 @@ void hc_mix_split(const float* h, const float* fn, int hcdim, int n_mix, int T, 
 #endif
     strata_ds4_launch(hc_mix_split_kernel, dim3(n_mix, T), kThreads, 0, s, h, fn, hcdim, eps, mixes, cnt, scale, base, hc, iters, hc_eps, pre,
                                                             post, comb);
+}
+void hc_mix_split_norm(const float* h, const float* fn, int hcdim, int n_mix, int T, float eps, float* mixes, unsigned* cnt,
+                       const float* scale, const float* base, int hc, int iters, float hc_eps, float* pre, float* post,
+                       float* comb, const float* nmix, const float* nw, float* nx, cudaStream_t s) {
+#if defined(STRATA_HIP_GFX906)
+    static const bool g906 = [] { const char* e = std::getenv("DS4_G906_HCMIX"); return !(e && e[0] == '0'); }();
+    // (opt-in, DS4_G906_HCNORM=1: bit-identical but slower - its one block of 256 threads reads the 80 KB the 1024-thread
+    //  launch read, and the mix launch ends later: 31.1 -> 30.3 tok/s on the Mac Pro 2019, 2 runs a side)
+    static const bool fuse = [] { const char* e = std::getenv("DS4_G906_HCNORM"); return e != nullptr && e[0] == '1'; }();
+    const int dim = hcdim / hc;
+    if (g906 && fuse && n_mix <= 32 && T <= kWin && hcdim % (kHcS * 4) == 0 && hc <= 8 && dim <= 8192 && nmix != pre) {
+        strata_ds4_launch(hc_mix_split_norm_g906_kernel, dim3(n_mix * kHcS + 1, T), kThreads, 0, s, h, fn, hcdim, eps, mixes, cnt, scale,
+                          base, hc, iters, hc_eps, pre, post, comb, nmix, nw, nx);
+        return;
+    }
+#endif
+    hc_mix_split(h, fn, hcdim, n_mix, T, eps, mixes, cnt, scale, base, hc, iters, hc_eps, pre, post, comb, s);
+    hc_pre_norm(h, nmix, nw, hcdim / hc, hc, T, eps, nx, s);
 }
 void hc_split(const float* mixes, const float* scale, const float* base, int hc, int iters, float hc_eps, int T,
               float* pre, float* post, float* comb, cudaStream_t s) {
