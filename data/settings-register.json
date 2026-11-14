@@ -9806,6 +9806,809 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_G906_DENSE9",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 6948,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/GFX906_KERNEL_PLAN.md:260"
+   ],
+   "first_commit": "86687a1554",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "86687a1554",
+   "last_date": "2026-11-10",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the wave64 dense kernel for the small dense rows [docs/GFX906_KERNEL_PLAN.md:260]; on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_DOWN",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 7497,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/GFX906_KERNEL_PLAN.md:57"
+   ],
+   "first_commit": "bebf19d6b1",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "bebf19d6b1",
+   "last_date": "2026-11-10",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 expert down kernel [docs/GFX906_KERNEL_PLAN.md:57]; on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_DPP",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2384,
+     "backend": "hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2384,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "472ad62b69",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "472ad62b69",
+   "last_date": "2026-11-09",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): wavefront sums by DPP row operations in the gfx906 kernels (src/kernels/cuda/native_mmvq.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_HC",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/fused_gr.cu",
+     "line": 3041,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "65b859d87f",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "65b859d87f",
+   "last_date": "2026-11-09",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 hyper-connection kernels (src/kernels/cuda/fused_gr.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_HC_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/fused_gr.cu",
+     "line": 2837,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "16",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "65b859d87f",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "65b859d87f",
+   "last_date": "2026-11-09",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): rows a block of the gfx906 hyper-connection down kernel, 4 / 8 / 16 (default 16). A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_IQ2",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 5758,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "86687a1554",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "86687a1554",
+   "last_date": "2026-11-10",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 IQ2 expert kernels (src/kernels/cuda/iq_kernels.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_IQ4NL",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2746,
+     "backend": "hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2746,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "f09a0c85e8",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "f09a0c85e8",
+   "last_date": "2026-11-10",
+   "status": "opt-in",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): =1 turns on the lane-group IQ4_NL dense kernel. Off by default: mmvq_bench measured no net gain on the Vega II Duo (comment at the read, src/kernels/cuda/native_mmvq.cu).",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_IQ4XS",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2799,
+     "backend": "hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2799,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "65b859d87f",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "65b859d87f",
+   "last_date": "2026-11-09",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 IQ4_XS dense kernel (src/kernels/cuda/native_mmvq.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_KQ",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 6765,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36.md:147"
+   ],
+   "first_commit": "df7afd1acd",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "df7afd1acd",
+   "last_date": "2026-11-11",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 K-quant expert kernels [docs/QWEN36.md:147]; on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_KQ_DLPR",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/iq_kernels.cu",
+     "line": 7239,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "df7afd1acd",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "df7afd1acd",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): lanes a row of the K-quant expert down kernel, 4 (default) or 2; both measured the same, 116.3 vs 116.2 tok/s (comment at the read). A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_LG",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2459,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "-1",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "f09a0c85e8",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "f09a0c85e8",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): forces the lane-group dense kernels on (1) or off (0); unset, the row size decides. A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_LG_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2471,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "f09a0c85e8",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "f09a0c85e8",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): rows a block of the lane-group dense kernels; 0 (default) lets the kernel choose. A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_LPR",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2440,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "f09a0c85e8",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "bebf19d6b1",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): lanes a row of the lane-group dense kernels; 0 (default) takes it from the row's task count. A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_MMVF1",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_bf16.cu",
+     "line": 494,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "e7e16479ff",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "e7e16479ff",
+   "last_date": "2026-11-10",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the rows-a-block BF16 dense kernel at one token (src/kernels/cuda/native_bf16.cu); =0 keeps one row a block; on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q4K",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2565,
+     "backend": "hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2565,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "65b859d87f",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "65b859d87f",
+   "last_date": "2026-11-09",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 Q4_K dense kernel (src/kernels/cuda/native_mmvq.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q4K_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2893,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "65b859d87f",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "65b859d87f",
+   "last_date": "2026-11-09",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): rows a block of the gfx906 Q4_K dense kernel; 0 (default) lets the kernel choose. A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q5K",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2652,
+     "backend": "hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2652,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "f09a0c85e8",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "f09a0c85e8",
+   "last_date": "2026-11-10",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 Q5_K dense kernel (src/kernels/cuda/native_mmvq.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q6K",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2486,
+     "backend": "hip",
+     "fn": "getenv"
+    },
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2486,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "013b0b5d75",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "013b0b5d75",
+   "last_date": "2026-11-09",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 Q6_K dense kernel (src/kernels/cuda/native_mmvq.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q8P",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3147,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36.md:139"
+   ],
+   "first_commit": "df7afd1acd",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "df7afd1acd",
+   "last_date": "2026-11-11",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 Q8_0 dense kernel [docs/QWEN36.md:139]; on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q8P_LPR",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3219,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "df7afd1acd",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "df7afd1acd",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): lanes a row of the gfx906 Q8_0 dense kernel; 0 (default) lets the kernel choose. A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_Q8P_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 3218,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "df7afd1acd",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "df7afd1acd",
+   "last_date": "2026-11-11",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): rows a block of the gfx906 Q8_0 dense kernel; 0 (default) lets the kernel choose. A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_RPB",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2879,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "0",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "013b0b5d75",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "013b0b5d75",
+   "last_date": "2026-11-09",
+   "status": "research",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): rows a block of the gfx906 Q6_K dense kernel; 0 (default) lets the kernel choose. A tuning value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_G906_WIDE",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/kernels/cuda/native_mmvq.cu",
+     "line": 2455,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "bebf19d6b1",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "bebf19d6b1",
+   "last_date": "2026-11-10",
+   "status": "rollback",
+   "owner": "kernels/cuda",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 dense kernels on rows of 4097 to 6144 inputs; =0 keeps the wave kernel for them (src/kernels/cuda/native_mmvq.cu); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_GDN_CHUNK",
    "backends": [
     "cuda",
@@ -11387,6 +12190,74 @@
    "status": "research",
    "owner": "kernels/cuda",
    "note": "[auto] diagnostic / trace / measurement switch by name or by code, not documented for users",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_GFX906_DEFAULTS",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/core/arch_defaults.cpp",
+     "line": 300,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "472ad62b69",
+   "first_date": "2026-11-09",
+   "since": null,
+   "last_commit": "472ad62b69",
+   "last_date": "2026-11-09",
+   "status": "rollback",
+   "owner": "core",
+   "note": "gfx906 builds only (steddyman fork): the defaults the engine sets for a Vega 20 card at start (src/core/arch_defaults.cpp, apply_gfx906_defaults); on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_GFX906_MTP_HEAD4",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/program/generate.cpp",
+     "line": 7198,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/GFX906_KERNEL_PLAN.md:129"
+   ],
+   "first_commit": "554c13a91c",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "554c13a91c",
+   "last_date": "2026-11-10",
+   "status": "rollback",
+   "owner": "program",
+   "note": "gfx906 builds only (steddyman fork): a Q4 copy of the output head for MTP drafting; =0 keeps the main head's format [docs/GFX906_KERNEL_PLAN.md:129]; on by default there, =0 returns the earlier path. No effect on other builds.",
    "retire_after": "",
    "retired_in": ""
   },
@@ -21834,6 +22705,39 @@
    "retired_in": ""
   },
   {
+   "name": "STRATA_MTP_HEAD_FMT",
+   "backends": [
+    "cuda-hip"
+   ],
+   "reads": [
+    {
+     "file": "src/core/mtp.cpp",
+     "line": 255,
+     "backend": "cuda-hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": null,
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "be44279b3f",
+   "first_date": "2026-11-10",
+   "since": null,
+   "last_commit": "be44279b3f",
+   "last_date": "2026-11-10",
+   "status": "research",
+   "owner": "core",
+   "note": "The format of the Q4 copy of the MTP draft head (src/core/mtp.cpp). A value for measurements, not for users.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
    "name": "STRATA_MTP_HIP_PRIO",
    "backends": [
     "cuda-hip"
@@ -31411,6 +32315,110 @@
    "status": "opt-in",
    "owner": "qwen35",
    "note": "[auto] documented for users (docs/QWEN36.md:91)",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36_G906",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/qwen35/q36_g906.cuh",
+     "line": 23,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36.md:149",
+    "docs/MAC_PRO_2019_LINUX.md:226"
+   ],
+   "first_commit": "df7afd1acd",
+   "first_date": "2026-11-11",
+   "since": null,
+   "last_commit": "df7afd1acd",
+   "last_date": "2026-11-11",
+   "status": "rollback",
+   "owner": "qwen35",
+   "note": "gfx906 builds only (steddyman fork): the gfx906 kernels of the Qwen3.6 engine [docs/QWEN36.md:149]; on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36_GQA",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/qwen35/q36_engine.cu",
+     "line": 435,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "flag",
+   "default_state": "on",
+   "code_default": null,
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [
+    "docs/QWEN36.md:142"
+   ],
+   "first_commit": "6a97522bbf",
+   "first_date": "2026-11-12",
+   "since": null,
+   "last_commit": "6a97522bbf",
+   "last_date": "2026-11-12",
+   "status": "rollback",
+   "owner": "qwen35",
+   "note": "gfx906 builds only (steddyman fork): the Qwen3.6 decode attention kernel that reads K / V once for the heads of a KV head; =0 uses the one-head kernel [docs/QWEN36.md:142]; on by default there, =0 returns the earlier path. No effect on other builds.",
+   "retire_after": "",
+   "retired_in": ""
+  },
+  {
+   "name": "STRATA_Q36_GQA_HEADS",
+   "backends": [
+    "hip"
+   ],
+   "reads": [
+    {
+     "file": "src/qwen35/q36_engine.cu",
+     "line": 431,
+     "backend": "hip",
+     "fn": "getenv"
+    }
+   ],
+   "parse": "int",
+   "default_state": null,
+   "code_default": "8",
+   "engine_sets": [],
+   "engine_defaults": [],
+   "launch_files": [],
+   "launch_sets": [],
+   "launch_reads": [],
+   "doc_mentions": [],
+   "first_commit": "6a97522bbf",
+   "first_date": "2026-11-12",
+   "since": null,
+   "last_commit": "6a97522bbf",
+   "last_date": "2026-11-12",
+   "status": "research",
+   "owner": "qwen35",
+   "note": "gfx906 builds only (steddyman fork): query heads a block of the Qwen3.6 grouped attention kernel, 8 (default, a block a KV head) or 4. A tuning value for measurements, not for users.",
    "retire_after": "",
    "retired_in": ""
   },
