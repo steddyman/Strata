@@ -19,6 +19,67 @@ were measured on them. A smaller GPU or less RAM changes what fits: DeepSeek in 
 
 The cards on this page sum up the tables below; the tables say which engine and settings each number comes from.
 
+## What this fork changed, in short
+
+The stock engine's GPU kernels are written for NVIDIA cards and compiled for AMD through HIP. On Vega 20 they ran at about
+100 GB/s of weight traffic a die, an eighth of what its memory can read. The speed here comes from three things: the GPU
+clock, kernels written for gfx906, and changes to each model's decode and prompt paths. Every number below was measured on
+the machine above.
+
+**The clock.** The driver's power level was pinned at `low`. On `auto` the same engine went from 50.9 to 70.9 tok/s
+(Qwen3.8 IQ3_S, engine 0.1.59.10). See the next section.
+
+**What the gfx906 kernels do differently.**
+
+- **All 64 lanes.** A Vega 20 wavefront has 64 lanes; the CUDA-shaped kernels use 32. The new kernels give each row of a
+  matrix a group of lanes and sum across lanes with the chip's own row operations (DPP).
+- **Wide loads, issued first.** The old kernels were limited by the count of small loads (1 and 4 bytes), not by bytes.
+  The new ones read 16 bytes at a time straight from the GGUF blocks, with no repacking and no extra VRAM, and issue
+  every load of a lane before its first use, which hides the memory's latency.
+- **Activations in local memory.** Each block of rows copies the activations into the GPU's local store (LDS) once,
+  so the rows do not read them again from VRAM.
+- **Few registers.** A kernel that needs 88 or more vector registers halves the waves a SIMD unit can hold. The kernels
+  stay at 64 or fewer.
+- **Fewer launches.** Many steps took several small launches a layer, each mostly fixed latency. Steps were merged
+  where that measured faster.
+
+**Which kernels.**
+
+| Step | Formats or parts | Used by |
+| --- | --- | --- |
+| Dense rows (GEMV) | Q4_K, Q5_K, Q6_K, Q8_0, IQ4_XS, BF16; rows of up to 6,144 inputs | all three models |
+| Expert gate/up and down | IQ2, IQ3_XXS, IQ4_NL down, Q4_K / Q5_K | Qwen3.8, Qwen3.6 |
+| Hyper-connections | norm, down and up in two kernels, not six launches | Qwen3.8 |
+| Router, residual norm, MoE combine, GDN rows | FP32 | Qwen3.6 |
+| Decode attention | one block for the 8 query heads of a KV head | Qwen3.6 |
+| Decode attention, split K / V | | DeepSeek |
+| Prompt expert kernels | F16 dot products, not F32 | DeepSeek |
+
+One Q6_K row kernel alone went from 112 to 48 µs (10240 x 2560, one token), but that moved decode only about 2 %: the
+time was spread over about 35 launches a layer, so every step had to move.
+
+**What changed per model.**
+
+| Model | Change | Measured |
+| --- | --- | --- |
+| Qwen3.8-Flash-Next | The kernels above, then the clock | IQ3_S 39 → 50.9 tok/s on `low`, 74.5 on `auto` |
+| | MTP drafting on Auto, not DFlash2 | 71–77 against 55–58 tok/s |
+| Qwen3.6-35B-A3B | The attention kernel reads each K / V row once, not 8 times | after a 16K prompt, Q8_0: 48 → 92 tok/s |
+| | Q4 on one die, not split over two | about 7 % faster |
+| DeepSeek-V4.1-Flash | No huge-page request for the experts' RAM copy (it froze both dies for seconds) | 8–30 tok/s run to run → steady |
+| | Tighter expert slots: 11 % more experts in VRAM | 5,355 → 5,955 experts a die |
+| | A prompt's experts moved into VRAM before decode | CPU lane 17 % → 8 % of picks after a 13.9K prompt |
+| | Split-KV decode attention | attention 31.9 → 26.7 ms a token after a 13.9K prompt |
+| | All of the decode changes together | 23–28 → 32–34 tok/s |
+| | Long prompts skip layers 20–39 for most rows; F16 expert kernels; whole-matrix copies | 97K prompt: 156 → 370 tok/s |
+
+**What did not change.** A build for another card is the same as before: the new defaults apply only in a gfx906 build,
+and each has a switch back (`STRATA_G906_*=0`, `STRATA_Q36_G906=0`, `STRATA_GFX906_DEFAULTS=0`, the `DS4_*` switches named
+below). The kernels sum in another order than the shared ones, so outputs match to float rounding, not bit for bit;
+[Quality checks](#quality-checks) has the comparison. The working logs are [GFX906_KERNEL_PLAN.md](GFX906_KERNEL_PLAN.md),
+[QWEN36.md](QWEN36.md#gfx906-vega-20-radeon-pro-vii-mi50-vega-ii) and
+[DEEPSEEK41.md](DEEPSEEK41.md#gfx906-mac-pro-2019-radeon-pro-vega-ii-duo).
+
 ## Before you start: let the GPUs clock up
 
 **This is the most important setting on this machine.** The amdgpu driver has a power level per card,
@@ -220,6 +281,14 @@ python tools/dsv41/compare.py --ref ref.npz --engine engine.f32
   ~9 ms, the Q5_K GEMVs 4.9, activation quantising 2.1, the expert gate/up and down kernels 3.8, attention ~2, about
   700 launches of kernels under 12 µs ~7. The next gains are fusing those small launches and porting the Qwen gfx906
   expert kernels (`g906_gu_kernel`, `g906_down_kernel`).
+- **DeepSeek, short prompts:** a prompt of a few hundred tokens reads at 40–70 tok/s, a long one at 300 or more. A read
+  of 96 tokens or more copies every expert that is not in VRAM to the dies, used or not, so it has a cost of several
+  seconds that does not shrink with the prompt. A 555-token read took 11.2 s; its GPU time over both dies was experts
+  15.0 s (with the waits for copies), attention 0.95 s, routing and the shared expert 0.19 s. `DS4_SKIP_UNPICKED=1`
+  copies only the experts the prompt picks. It still copied 55 % of them at 555 tokens, and it is not a clear win: 128
+  tokens 2.8 → 4.5 s, 340 tokens 9.1 → 7.3 s, 555 tokens 11.2 → 8.9 s, 1,032 tokens 13.0 → 12.6 s, 3,000 tokens
+  18.3 → 20.9 s (engine 0.1.59.21, 14 November 2026, one run each, a new engine start for every run, so each includes
+  first-prompt costs). It stays off. Not built: computing the experts that few tokens use on the CPU, as decode does.
 - **Qwen3.6:** remaining ideas are the shared-expert gate/up, the router top-k and a recurrent-layer kernel that spills
   registers (roughly 10 % together).
 
